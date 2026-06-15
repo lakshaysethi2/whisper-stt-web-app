@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0a0e1a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="Speech-to-text powered by Whisper.cpp. Record or upload audio for fast, accurate transcription.">
+  <title>Whisper STT</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <div class="logo-icon">⚡</div>
+      <h1>Whisper STT</h1>
+    </div>
+    <span class="model-badge" id="model-badge">...</span>
+  </header>
+
+  <main>
+    <!-- Record Card -->
+    <div class="card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+        Record
+      </div>
+      <div class="record-area">
+        <div class="record-ring">
+          <button class="record-btn" id="record-btn" aria-label="Toggle recording">
+            <svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              <line x1="12" x2="12" y1="19" y2="22"/>
+            </svg>
+          </button>
+        </div>
+        <div class="timer-row">
+          <span class="timer hidden" id="timer">00:00.0</span>
+          <span class="record-hint" id="record-hint">Tap to start recording</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Upload Card -->
+    <div class="card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+        Upload
+      </div>
+      <div class="file-drop" id="file-drop">
+        <svg class="file-drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <p class="file-drop-text" id="file-drop-text">Drop audio file or tap to browse</p>
+        <p class="file-drop-hint">MP3, WAV, FLAC, OGG, M4A, AAC</p>
+        <p class="filename hidden" id="file-name"></p>
+      </div>
+      <input type="file" id="file-input" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac,.wma,.opus,.webm,.mp4" hidden>
+      <button class="btn btn-primary hidden" id="transcribe-file-btn" style="margin-top: 14px;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Transcribe
+      </button>
+    </div>
+
+    <!-- Language Card -->
+    <div class="card">
+      <div class="form-group">
+        <label class="form-label" for="language-select">Language</label>
+        <select id="language-select">
+          <option value="">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="it">Italian</option>
+          <option value="pt">Portuguese</option>
+          <option value="ru">Russian</option>
+          <option value="zh">Chinese</option>
+          <option value="ja">Japanese</option>
+          <option value="ko">Korean</option>
+          <option value="ar">Arabic</option>
+          <option value="hi">Hindi</option>
+          <option value="nl">Dutch</option>
+          <option value="sv">Swedish</option>
+          <option value="pl">Polish</option>
+          <option value="tr">Turkish</option>
+          <option value="vi">Vietnamese</option>
+          <option value="th">Thai</option>
+          <option value="cs">Czech</option>
+          <option value="da">Danish</option>
+          <option value="fi">Finnish</option>
+          <option value="el">Greek</option>
+          <option value="he">Hebrew</option>
+          <option value="hu">Hungarian</option>
+          <option value="id">Indonesian</option>
+          <option value="ms">Malay</option>
+          <option value="no">Norwegian</option>
+          <option value="ro">Romanian</option>
+          <option value="sk">Slovak</option>
+          <option value="uk">Ukrainian</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Status -->
+    <div class="status-bar hidden" id="status"></div>
+
+    <!-- Results -->
+    <div class="card result-card hidden" id="result">
+      <div class="result-toolbar">
+        <div class="btn-group">
+          <button class="btn btn-outline btn-sm" id="copy-btn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+            Copy
+          </button>
+          <button class="btn btn-outline btn-sm" id="download-btn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Save
+          </button>
+        </div>
+        <div class="result-meta">
+          <span class="badge" id="result-lang"></span>
+          <span class="badge" id="result-duration"></span>
+        </div>
+      </div>
+      <div class="result-text" id="result-text"></div>
+      <div class="segments-list hidden" id="segments-wrapper">
+        <div class="segments-title">Segments</div>
+        <div id="segments"></div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
