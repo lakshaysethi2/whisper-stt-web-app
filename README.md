@@ -28,6 +28,11 @@ A self-hosted speech-to-text web application powered by [faster-whisper](https:/
 
 > **Note on Maxwell GPUs (CC 5.0):** Older GPUs like the 940MX lack FP16 tensor cores. The app automatically detects this and uses `float32` compute type. Performance will be lower than modern GPUs but functional with GPU acceleration.
 
+### Known Limitations
+
+- **Maxwell (CC 5.0) CUDA inference:** The pre-built CTranslate2 pip binary (`faster-whisper`) does not include working SM 5.0 CUDA kernels. The model loads into GPU memory but inference falls back to CPU. To get true GPU acceleration on Maxwell GPUs, compile CTranslate2 from source with `-DCUDA_ARCH_LIST="5.0"` and `-DWITH_MKL=OFF -DOPENMP_RUNTIME=COMP`.
+- **whisper.cpp alternative:** [whisper.cpp](https://github.com/ggerganov/whisper.cpp) supports CC 5.0 natively via GGML_CUDA. Build with `-DGGML_CUDA_ARCH_LIST="5.0"` for Maxwell GPUs. Requires manual compilation.
+
 ## Benchmark Results
 
 ### Test Environment

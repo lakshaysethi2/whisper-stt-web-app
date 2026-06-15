@@ -151,6 +151,8 @@ async def transcribe_audio(
     )
     elapsed = time.monotonic() - start
 
+    logger.info("Transcription done in %.2fs device=%s", elapsed, device)
+
     result = {"id": job_id, "segments": []}
     result["language"] = info.language
     result["device"] = _device_info.get("device", "unknown")

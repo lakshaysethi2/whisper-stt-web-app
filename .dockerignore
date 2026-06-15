@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.pyc
+.mimocode
+tmp/
+scripts/
+*.json
+*.md
+LICENSE
+start.sh
+.gitignore
+benchmark_results.json
+load_test_results.json

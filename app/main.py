@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -13,6 +15,10 @@ from app.config import (
     ALLOWED_EXTENSIONS, SUPPORTED_MODELS, get_job_dir, cleanup_job,
 )
 from app.transcriber import load_model, transcribe_audio, _device_info
+
+logger = logging.getLogger(__name__)
+
+VALID_LANG_RE = re.compile(r"^[a-z]{2}(-[a-zA-Z]{2,})?$")
 
 
 @asynccontextmanager
@@ -78,11 +84,19 @@ async def transcribe(
     file_path.write_bytes(content)
 
     lang = language or WHISPER_LANGUAGE or "en"
+    if not VALID_LANG_RE.match(lang):
+        raise HTTPException(400, f"Invalid language code: {lang}. Expected format: xx or xx-XX (e.g. en, en-US)")
+
+    logger.info("Transcribing %s (%d bytes) lang=%s job=%s", file.filename, len(content), lang, job_id)
 
     try:
         result = await transcribe_audio(str(file_path), lang, job_id)
+        logger.info("Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
+                     job_id, len(result.get("segments", [])),
+                     result.get("duration", 0), result.get("process_time", 0))
         return JSONResponse(result)
     except Exception as e:
+        logger.error("Transcription failed job=%s error=%s", job_id, str(e))
         raise HTTPException(500, f"Transcription failed: {str(e)}")
     finally:
         cleanup_job(job_id)
