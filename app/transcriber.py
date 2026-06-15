@@ -1,25 +1,35 @@
 import asyncio
-import shutil
-from pathlib import Path
+import logging
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 
 from app.config import WHISPER_MODEL, get_job_dir
 
+logger = logging.getLogger(__name__)
+
 _model = None
 _batched = None
 
 
-def _get_model():
+def load_model():
     global _model, _batched
-    if _model is None:
+    if _model is not None:
+        return
+    logger.info("Loading model %s...", WHISPER_MODEL)
+    try:
         _model = WhisperModel(
             WHISPER_MODEL,
             device="cuda",
-            compute_type="int8_float16",
+            compute_type="float32",
         )
-        _batched = BatchedInferencePipeline(model=_model)
-    return _batched
+    except Exception:
+        _model = WhisperModel(
+            WHISPER_MODEL,
+            device="cpu",
+            compute_type="int8",
+        )
+    _batched = BatchedInferencePipeline(model=_model)
+    logger.info("Model %s loaded.", WHISPER_MODEL)
 
 
 async def transcribe_audio(
@@ -27,10 +37,8 @@ async def transcribe_audio(
     language: str = None,
     job_id: str = "unknown",
 ) -> dict:
-    pipeline = _get_model()
-
     segments, info = await asyncio.to_thread(
-        pipeline.transcribe,
+        _batched.transcribe,
         audio_path,
         language=language or "en",
         batch_size=16,

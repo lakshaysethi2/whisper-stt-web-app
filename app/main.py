@@ -1,3 +1,6 @@
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -9,9 +12,16 @@ from app.config import (
     WHISPER_MODEL, WHISPER_LANGUAGE, MAX_FILE_SIZE,
     ALLOWED_EXTENSIONS, get_job_dir, cleanup_job,
 )
-from app.transcriber import transcribe_audio
+from app.transcriber import load_model, transcribe_audio
 
-app = FastAPI(title="Whisper STT", version="2.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await asyncio.to_thread(load_model)
+    yield
+
+
+app = FastAPI(title="Whisper STT", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

@@ -57,7 +57,11 @@ Open http://localhost:8000 in your browser.
 
 ### Manual Setup
 
-**Requirements:** Python 3.10+, CUDA toolkit, cuDNN
+**Requirements:**
+- Python 3.10+
+- NVIDIA GPU with **2 GB+ VRAM** (large-v3-turbo default) or 8 GB+ for larger models
+- CUDA toolkit + cuDNN
+- 4 GB+ system RAM
 
 ```bash
 git clone https://github.com/lakshaysethi2/whisper-stt-web-app.git
