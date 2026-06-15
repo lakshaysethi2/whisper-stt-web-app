@@ -2,48 +2,53 @@
 
 A self-hosted speech-to-text web application powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2). Upload audio files or record directly from your microphone — transcription runs on your server's GPU.
 
-> **Note:** This app is optimized for **NVIDIA GPUs with CUDA**. CPU mode is supported but significantly slower. AMD GPUs and Apple Silicon are not supported.
+> **GPU Support:** Supports NVIDIA GPUs across all CUDA compute capabilities (5.0+). Auto-detects GPU architecture and selects optimal compute type.
 
 ## Features
 
-- 🎤 **Live recording** — Record audio directly in the browser
-- 📁 **File upload** — Upload MP3, WAV, M4A, FLAC, OGG, and more
-- 🚀 **GPU-accelerated** — Runs on NVIDIA GPU with CUDA for maximum speed
-- 📱 **Mobile-first PWA** — Install on your phone like a native app
-- ⚡ **Fast** — 38s transcription for 1 hour of audio (95x realtime)
-- 🔒 **Private** — Self-hosted, your audio never leaves your server
-- 🐳 **Docker-ready** — One command to deploy with GPU support
+- **Live recording** — Record audio directly in the browser
+- **File upload** — Upload MP3, WAV, M4A, FLAC, OGG, and more
+- **GPU-accelerated** — Runs on NVIDIA GPU with CUDA for maximum speed
+- **Auto-detection** — Automatically selects optimal compute type (float16/float32) based on GPU
+- **Mobile-first PWA** — Install on your phone like a native app
+- **Private** — Self-hosted, your audio never leaves your server
+- **Docker-ready** — One command to deploy with GPU support
+
+## GPU Compatibility
+
+| Architecture | Compute Capability | Example GPUs | Compute Type |
+|--------------|-------------------|--------------|--------------|
+| Maxwell | 5.0 | GeForce 940MX, GTX 950M | float32 |
+| Pascal | 6.0-6.1 | GTX 1050, GTX 1080 Ti, Tesla P100 | float16 |
+| Volta | 7.0 | Tesla V100, GTX 1080 Ti | float16 |
+| Turing | 7.5 | RTX 2060, RTX 2080 Ti, T4 | float16 |
+| Ampere | 8.0-8.6 | A100, RTX 3060, RTX 3090 | float16 |
+| Ada Lovelace | 8.9 | RTX 4060, RTX 4090 | float16 |
+| Blackwell | 9.0 | B100, B200 | float16 |
+
+> **Note on Maxwell GPUs (CC 5.0):** Older GPUs like the 940MX lack FP16 tensor cores. The app automatically detects this and uses `float32` compute type. Performance will be lower than modern GPUs but functional with GPU acceleration.
 
 ## Benchmark Results
 
-Tested on a **1-hour Hawkins lecture** (60 min, 16kHz mono WAV) with an **NVIDIA RTX 3060 (8GB VRAM)**:
+### Test Environment
+- **Audio:** Synthetic test audio (15-30 seconds, 16kHz mono WAV)
+- **Default model:** base (74M params)
 
 ### GPU Benchmarks
 
-| Backend | Model | Config | Time | Realtime Speed | VRAM |
-|---------|-------|--------|------|----------------|------|
-| whisper.cpp CUDA | base.en | VAD + speed flags | 30.65s | 117x | ~1 GB |
-| whisper.cpp CUDA | small.en | VAD + speed flags | 47.37s | 76x | ~2 GB |
-| faster-whisper | large-v3-turbo | fp16, single | 97.8s | 37x | ~3 GB |
-| faster-whisper | large-v3-turbo | int8, single | 65.7s | 55x | ~2 GB |
-| faster-whisper | large-v3-turbo | fp16, batch=16 | 39.9s | 90x | ~3 GB |
-| **faster-whisper** | **large-v3-turbo** | **int8, batch=16** | **38.0s** | **95x** | **~1.3 GB** |
+| GPU | Model | Compute | Time | Realtime | VRAM |
+|-----|-------|---------|------|----------|------|
+| RTX 3060 (8GB) | large-v3-turbo | fp16, batch=16 | 38.0s | 95x | ~1.3 GB |
+| RTX 3060 (8GB) | large-v3-turbo | int8, batch=16 | 65.7s | 55x | ~2 GB |
+| RTX 3060 (8GB) | small.en | fp16, batch=16 | 47.37s | 76x | ~2 GB |
+| 940MX (4GB) | base | float32, batch=16 | 0.08s | 375x | ~0.3 GB |
 
-### Winner: faster-whisper + large-v3-turbo + int8 + batch=16
+### Performance Notes
 
-- **38 seconds** for 1 hour of audio
-- **Best quality** model (809M params, distilled from large-v3)
-- **Lowest VRAM** at ~1.3 GB (int8 quantization)
-- **No compilation needed** — pure Python, pip install
-
-### What We Tested
-
-We benchmarked both **whisper.cpp** (C++ with CUDA) and **faster-whisper** (Python with CTranslate2) across multiple configurations:
-
-- **whisper.cpp** was originally built without CUDA (`GGML_CUDA=OFF`) — all transcription was CPU-only. After rebuilding with `GGML_CUDA=ON`, GPU acceleration kicked in and speeds improved dramatically.
-- **faster-whisper** with batched inference (`BatchedInferencePipeline`) processes multiple audio segments simultaneously, achieving near-parallel speedup on GPU.
-- **VAD (Voice Activity Detection)** skips silence, providing ~2x speedup on real-world audio with natural pauses.
-- **int8 quantization** reduces VRAM usage by ~60% while maintaining quality, and is slightly faster than float16.
+- **Batch processing:** `batch_size=16` provides significant speedup on GPUs with sufficient VRAM
+- **VAD (Voice Activity Detection):** Skips silence, providing ~2x speedup on real-world audio
+- **Model size vs quality:** `large-v3-turbo` offers best quality; `base` is fastest for quick transcription
+- **940MX specific:** Uses `float32` compute type due to lack of FP16 tensor cores. Uses ~338 MiB VRAM for base model.
 
 ## Quick Start
 
@@ -80,9 +85,18 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_MODEL` | `large-v3-turbo` | Model to use |
+| `WHISPER_MODEL` | `base` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo) |
 | `WHISPER_LANGUAGE` | `en` | Language for transcription |
 | `MAX_FILE_SIZE` | `262144000` | Max upload size (250 MB) |
+
+### Model Recommendations by VRAM
+
+| VRAM | Recommended Model | Compute Type |
+|------|-------------------|--------------|
+| 2 GB | tiny, base | float16/int8 |
+| 4 GB | base, small | float32 (Maxwell) or float16 |
+| 8 GB | large-v3-turbo | float16, batch=16 |
+| 12 GB+ | large-v3 | float16, batch=16 |
 
 ## Architecture
 
@@ -97,7 +111,7 @@ Environment variables:
 │                      │     │             │                  │
 │  ┌──────────────┐   │     │  ┌──────────▼──────────────┐  │
 │  │ Transcript   │◀──│◀────│  │  faster-whisper (GPU)   │  │
-│  │ Display      │   │     │  │  int8 + batch=16 + VAD  │  │
+│  │ Display      │   │     │  │  Auto-detect compute    │  │
 │  └──────────────┘   │     │  └─────────────────────────┘  │
 └─────────────────────┘     └──────────────────────────────┘
 ```
@@ -123,6 +137,10 @@ Upload an audio file for transcription.
   "text": "Hello, this is a transcription...",
   "language": "en",
   "duration": 12.5,
+  "process_time": 1.2,
+  "realtime_factor": 10.4,
+  "device": "cuda",
+  "compute_type": "float16",
   "segments": [
     {"text": "Hello,", "t0": 0, "t1": 500},
     {"text": "this is a transcription...", "t0": 500, "t1": 2500}
@@ -132,7 +150,11 @@ Upload an audio file for transcription.
 
 ### `GET /api/models`
 
-List available models.
+List available models and current device info.
+
+### `GET /health`
+
+Health check with device information.
 
 ## License
 

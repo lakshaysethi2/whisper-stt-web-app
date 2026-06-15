@@ -10,9 +10,9 @@ from pathlib import Path
 
 from app.config import (
     WHISPER_MODEL, WHISPER_LANGUAGE, MAX_FILE_SIZE,
-    ALLOWED_EXTENSIONS, get_job_dir, cleanup_job,
+    ALLOWED_EXTENSIONS, SUPPORTED_MODELS, get_job_dir, cleanup_job,
 )
-from app.transcriber import load_model, transcribe_audio
+from app.transcriber import load_model, transcribe_audio, _device_info
 
 
 @asynccontextmanager
@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Whisper STT", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Whisper STT", version="2.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,21 +40,23 @@ async def index():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": WHISPER_MODEL}
+    return {
+        "status": "ok",
+        "model": WHISPER_MODEL,
+        "device": _device_info.get("device", "unknown"),
+        "compute_type": _device_info.get("compute_type", "unknown"),
+        "compute_capability": _device_info.get("compute_capability", 0),
+    }
 
 
 @app.get("/api/models")
 async def list_models():
-    models = [
-        {"name": "tiny", "params": "39M", "speed": "~32x"},
-        {"name": "base", "params": "74M", "speed": "~16x"},
-        {"name": "base.en", "params": "74M", "speed": "~16x"},
-        {"name": "small", "params": "244M", "speed": "~6x"},
-        {"name": "small.en", "params": "244M", "speed": "~6x"},
-        {"name": "medium", "params": "769M", "speed": "~2x"},
-        {"name": "large-v3", "params": "1550M", "speed": "1x"},
-    ]
-    return {"current": WHISPER_MODEL, "available": models}
+    return {
+        "current": WHISPER_MODEL,
+        "device": _device_info.get("device", "unknown"),
+        "compute_type": _device_info.get("compute_type", "unknown"),
+        "available": SUPPORTED_MODELS,
+    }
 
 
 @app.post("/api/transcribe")

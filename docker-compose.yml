@@ -7,6 +7,8 @@ services:
       - "8000:8000"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
     deploy:
       resources:
         reservations:
@@ -14,6 +16,11 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    volumes:
+      - hf-cache:/root/.cache/huggingface
     tmpfs:
       - /tmp/whisper-stt:size=500M
     restart: unless-stopped
+
+volumes:
+  hf-cache:
