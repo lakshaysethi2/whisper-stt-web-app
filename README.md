@@ -1,28 +1,55 @@
 # Whisper STT Web App
 
-A self-hosted speech-to-text web application powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp). Upload audio files or record directly from your microphone — transcription runs on your server's GPU.
+A self-hosted speech-to-text web application powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2). Upload audio files or record directly from your microphone — transcription runs on your server's GPU.
 
 ## Features
 
 - 🎤 **Live recording** — Record audio directly in the browser
 - 📁 **File upload** — Upload MP3, WAV, M4A, FLAC, OGG, and more
-- 🚀 **GPU-accelerated** — Runs whisper.cpp with CUDA on your server GPU
+- 🚀 **GPU-accelerated** — Runs on NVIDIA GPU with CUDA for maximum speed
 - 📱 **Mobile-first PWA** — Install on your phone like a native app
-- 🌐 **Multi-language** — Auto-detect or manually select from 99 languages
-- ⚡ **Fast** — Async processing with real-time status updates
+- ⚡ **Fast** — 38s transcription for 1 hour of audio (95x realtime)
 - 🔒 **Private** — Self-hosted, your audio never leaves your server
-- 🐳 **Docker-ready** — One command to deploy
+- 🐳 **Docker-ready** — One command to deploy with GPU support
+
+## Benchmark Results
+
+Tested on a **1-hour Hawkins lecture** (60 min, 16kHz mono WAV) with an **NVIDIA RTX 3060 (8GB VRAM)**:
+
+### GPU Benchmarks
+
+| Backend | Model | Config | Time | Realtime Speed | VRAM |
+|---------|-------|--------|------|----------------|------|
+| whisper.cpp CUDA | base.en | VAD + speed flags | 30.65s | 117x | ~1 GB |
+| whisper.cpp CUDA | small.en | VAD + speed flags | 47.37s | 76x | ~2 GB |
+| faster-whisper | large-v3-turbo | fp16, single | 97.8s | 37x | ~3 GB |
+| faster-whisper | large-v3-turbo | int8, single | 65.7s | 55x | ~2 GB |
+| faster-whisper | large-v3-turbo | fp16, batch=16 | 39.9s | 90x | ~3 GB |
+| **faster-whisper** | **large-v3-turbo** | **int8, batch=16** | **38.0s** | **95x** | **~1.3 GB** |
+
+### Winner: faster-whisper + large-v3-turbo + int8 + batch=16
+
+- **38 seconds** for 1 hour of audio
+- **Best quality** model (809M params, distilled from large-v3)
+- **Lowest VRAM** at ~1.3 GB (int8 quantization)
+- **No compilation needed** — pure Python, pip install
+
+### What We Tested
+
+We benchmarked both **whisper.cpp** (C++ with CUDA) and **faster-whisper** (Python with CTranslate2) across multiple configurations:
+
+- **whisper.cpp** was originally built without CUDA (`GGML_CUDA=OFF`) — all transcription was CPU-only. After rebuilding with `GGML_CUDA=ON`, GPU acceleration kicked in and speeds improved dramatically.
+- **faster-whisper** with batched inference (`BatchedInferencePipeline`) processes multiple audio segments simultaneously, achieving near-parallel speedup on GPU.
+- **VAD (Voice Activity Detection)** skips silence, providing ~2x speedup on real-world audio with natural pauses.
+- **int8 quantization** reduces VRAM usage by ~60% while maintaining quality, and is slightly faster than float16.
 
 ## Quick Start
 
 ### With Docker (recommended)
 
 ```bash
-# Clone the repo
-git clone https://github.com/yourusername/whisper-stt-web-app.git
+git clone https://github.com/lakshaysethi2/whisper-stt-web-app.git
 cd whisper-stt-web-app
-
-# Build and run
 docker compose up --build
 ```
 
@@ -30,40 +57,16 @@ Open http://localhost:8000 in your browser.
 
 ### Manual Setup
 
-**Requirements:** Python 3.10+, CMake, CUDA toolkit (for GPU support)
+**Requirements:** Python 3.10+, CUDA toolkit, cuDNN
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/yourusername/whisper-stt-web-app.git
+git clone https://github.com/lakshaysethi2/whisper-stt-web-app.git
 cd whisper-stt-web-app
-
-# Build whisper.cpp
-cd whisper.cpp
-cmake -B build -DGGML_CUDA=ON
-cmake --build build --config Release -j
-cd ..
-
-# Install Python dependencies
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# Download a model (base is a good balance of speed/quality)
-bash scripts/download-model.sh base
-
-# Run the server
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+./start.sh
 ```
-
-## Model Sizes
-
-| Model  | Parameters | English-only | Multilingual | Required VRAM | Relative Speed |
-|--------|-----------|-------------|-------------|---------------|----------------|
-| tiny   | 39 M      | yes         | yes         | ~1 GB         | ~32x           |
-| base   | 74 M      | yes         | yes         | ~1 GB         | ~16x           |
-| small  | 244 M     | yes         | yes         | ~2 GB         | ~6x            |
-| medium | 769 M     | yes         | yes         | ~5 GB         | ~2x            |
-| large  | 1550 M    | no          | yes         | ~10 GB        | 1x             |
-
-Use `WHISPER_MODEL=large` environment variable to change the model.
 
 ## Configuration
 
@@ -71,29 +74,26 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_MODEL` | `base` | Model size to use |
-| `WHISPER_LANGUAGE` | (auto) | Force a specific language |
-| `WHISPER_THREADS` | (auto) | Number of CPU threads |
-| `MAX_FILE_SIZE` | `262144000` | Max upload size in bytes (250 MB) |
-| `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `8000` | Server port |
+| `WHISPER_MODEL` | `large-v3-turbo` | Model to use |
+| `WHISPER_LANGUAGE` | `en` | Language for transcription |
+| `MAX_FILE_SIZE` | `262144000` | Max upload size (250 MB) |
 
 ## Architecture
 
 ```
-┌─────────────────────┐     ┌──────────────────────────┐
-│   Mobile Browser     │     │      FastAPI Server       │
-│                      │     │                           │
-│  ┌──────────────┐   │     │  ┌─────────────────────┐  │
-│  │ Audio Record  │   │────▶│  │  /api/transcribe    │  │
-│  │ or File Upload│   │ WS  │  │  (multipart upload) │  │
-│  └──────────────┘   │     │  └──────────┬──────────┘  │
-│                      │     │             │              │
-│  ┌──────────────┐   │     │  ┌──────────▼──────────┐  │
-│  │ Transcript   │◀──│◀────│  │  whisper.cpp (GPU)  │  │
-│  │ Display      │   │     │  │  via subprocess      │  │
-│  └──────────────┘   │     │  └─────────────────────┘  │
-└─────────────────────┘     └──────────────────────────┘
+┌─────────────────────┐     ┌──────────────────────────────┐
+│   Mobile Browser     │     │      FastAPI Server           │
+│                      │     │                               │
+│  ┌──────────────┐   │     │  ┌─────────────────────────┐  │
+│  │ Audio Record  │   │────▶│  │  /api/transcribe        │  │
+│  │ or File Upload│   │     │  │  (multipart upload)     │  │
+│  └──────────────┘   │     │  └──────────┬──────────────┘  │
+│                      │     │             │                  │
+│  ┌──────────────┐   │     │  ┌──────────▼──────────────┐  │
+│  │ Transcript   │◀──│◀────│  │  faster-whisper (GPU)   │  │
+│  │ Display      │   │     │  │  int8 + batch=16 + VAD  │  │
+│  └──────────────┘   │     │  └─────────────────────────┘  │
+└─────────────────────┘     └──────────────────────────────┘
 ```
 
 ## Supported Audio Formats
@@ -108,7 +108,7 @@ Upload an audio file for transcription.
 
 **Request:** `multipart/form-data`
 - `file` — Audio file (required)
-- `language` — Language code, e.g. `en`, `es`, `fr` (optional, auto-detect if omitted)
+- `language` — Language code, e.g. `en`, `es`, `fr` (optional, defaults to `en`)
 
 **Response:** `application/json`
 ```json
@@ -117,13 +117,12 @@ Upload an audio file for transcription.
   "text": "Hello, this is a transcription...",
   "language": "en",
   "duration": 12.5,
-  "segments": [...]
+  "segments": [
+    {"text": "Hello,", "t0": 0, "t1": 500},
+    {"text": "this is a transcription...", "t0": 500, "t1": 2500}
+  ]
 }
 ```
-
-### `GET /api/status/{id}`
-
-Check transcription status (for WebSocket fallback).
 
 ### `GET /api/models`
 
