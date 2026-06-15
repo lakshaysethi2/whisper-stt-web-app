@@ -1,7 +1,7 @@
 {
   "name": "Whisper STT",
   "short_name": "Whisper",
-  "description": "Speech-to-text powered by whisper.cpp",
+  "description": "Speech-to-text powered by faster-whisper",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0f172a",
