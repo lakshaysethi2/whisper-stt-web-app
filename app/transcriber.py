@@ -11,23 +11,27 @@ _model = None
 _batched = None
 
 
+def _detect_device() -> tuple[str, str]:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda", "float16"
+    except ImportError:
+        pass
+    return "cpu", "int8"
+
+
 def load_model():
     global _model, _batched
     if _model is not None:
         return
-    logger.info("Loading model %s...", WHISPER_MODEL)
-    try:
-        _model = WhisperModel(
-            WHISPER_MODEL,
-            device="cuda",
-            compute_type="float32",
-        )
-    except Exception:
-        _model = WhisperModel(
-            WHISPER_MODEL,
-            device="cpu",
-            compute_type="int8",
-        )
+    device, compute_type = _detect_device()
+    logger.info("Loading model %s on %s (%s)...", WHISPER_MODEL, device, compute_type)
+    _model = WhisperModel(
+        WHISPER_MODEL,
+        device=device,
+        compute_type=compute_type,
+    )
     _batched = BatchedInferencePipeline(model=_model)
     logger.info("Model %s loaded.", WHISPER_MODEL)
 

@@ -2,6 +2,8 @@
 
 A self-hosted speech-to-text web application powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2). Upload audio files or record directly from your microphone — transcription runs on your server's GPU.
 
+> **Note:** This app is optimized for **NVIDIA GPUs with CUDA**. CPU mode is supported but significantly slower. AMD GPUs and Apple Silicon are not supported.
+
 ## Features
 
 - 🎤 **Live recording** — Record audio directly in the browser
@@ -59,8 +61,8 @@ Open http://localhost:8000 in your browser.
 
 **Requirements:**
 - Python 3.10+
-- NVIDIA GPU with **2 GB+ VRAM** (large-v3-turbo default) or 8 GB+ for larger models
-- CUDA toolkit + cuDNN
+- **NVIDIA GPU** with 2 GB+ VRAM (recommended) or CPU fallback (slow)
+- CUDA toolkit + cuDNN (for GPU mode)
 - 4 GB+ system RAM
 
 ```bash
