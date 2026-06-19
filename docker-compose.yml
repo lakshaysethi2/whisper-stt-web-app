@@ -7,7 +7,7 @@ services:
       - "8000:8000"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
     deploy:
       resources:
@@ -19,7 +19,7 @@ services:
     volumes:
       - hf-cache:/root/.cache/huggingface
     tmpfs:
-      - /tmp/whisper-stt:size=500M
+      - /tmp/whisper-stt:size=500M,uid=1000,gid=1000
     restart: unless-stopped
 
 volumes:

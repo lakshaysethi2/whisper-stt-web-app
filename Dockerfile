@@ -17,9 +17,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ app/
 COPY static/ static/
 
-RUN mkdir -p /tmp/whisper-stt && chown appuser:appuser /tmp/whisper-stt
-
 RUN useradd -m -s /bin/bash appuser
+RUN mkdir -p /tmp/whisper-stt && chown appuser:appuser /tmp/whisper-stt
 USER appuser
 
 EXPOSE 8000

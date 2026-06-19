@@ -2,7 +2,7 @@ import os
 import shutil
 from pathlib import Path
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "262144000"))
 

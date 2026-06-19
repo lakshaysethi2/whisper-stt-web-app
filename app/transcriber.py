@@ -58,10 +58,14 @@ def _detect_device() -> tuple[str, str, int]:
     """
     try:
         import ctypes
-        ctypes.CDLL("libcuda.so")
+        ctypes.CDLL("libcuda.so.1")
     except OSError:
-        logger.info("No CUDA library found, using CPU int8")
-        return "cpu", "int8", 0
+        try:
+            import ctypes
+            ctypes.CDLL("libcuda.so")
+        except OSError:
+            logger.info("No CUDA library found, using CPU int8")
+            return "cpu", "int8", 0
 
     gpu_info = _get_gpu_info()
     if not gpu_info:
@@ -93,7 +97,7 @@ def load_model():
         return
 
     device, compute_type, cc = _detect_device()
-    _device_info = {"device": device, "compute_type": compute_type, "compute_capability": cc}
+    _device_info.update({"device": device, "compute_type": compute_type, "compute_capability": cc})
 
     logger.info("Loading model %s on %s (%s)...", WHISPER_MODEL, device, compute_type)
 
