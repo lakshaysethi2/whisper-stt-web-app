@@ -4,7 +4,7 @@ from pathlib import Path
 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "262144000"))
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "2147483648"))  # 2 GB
 
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/whisper-stt"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)

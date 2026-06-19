@@ -9,6 +9,8 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+      - HF_TOKEN=${HF_TOKEN}
+      - HF_HOME=/cache
     deploy:
       resources:
         reservations:
@@ -17,7 +19,7 @@ services:
               count: 1
               capabilities: [gpu]
     volumes:
-      - hf-cache:/root/.cache/huggingface
+      - hf-cache:/cache
     tmpfs:
       - /tmp/whisper-stt:size=500M,uid=1000,gid=1000
     restart: unless-stopped

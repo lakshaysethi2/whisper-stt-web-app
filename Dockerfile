@@ -19,6 +19,8 @@ COPY static/ static/
 
 RUN useradd -m -s /bin/bash appuser
 RUN mkdir -p /tmp/whisper-stt && chown appuser:appuser /tmp/whisper-stt
+RUN mkdir -p /cache && chown appuser:appuser /cache
+ENV HF_HOME=/cache
 USER appuser
 
 EXPOSE 8000

@@ -206,8 +206,7 @@
 
   // --- Upload & Transcribe ---
 
-  async function uploadFile(file) {
-    showStatus("Transcribing... This may take a moment.");
+  function uploadFile(file) {
     els.transcribeFileBtn.disabled = true;
     els.recordBtn.disabled = true;
 
@@ -215,22 +214,63 @@
     form.append("file", file);
     if (els.language.value) form.append("language", els.language.value);
 
-    try {
-      const res = await fetch("/api/transcribe", { method: "POST", body: form });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || "Transcription failed");
-      }
-      const data = await res.json();
+    showStatus("Uploading: 0%...");
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+
+      xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          showStatus(`Uploading: ${percent}%...`);
+        }
+      });
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            resolve(data);
+          } catch (err) {
+            reject(new Error("Invalid response from server"));
+          }
+        } else {
+          try {
+            const err = JSON.parse(xhr.responseText);
+            reject(new Error(err.detail || `Server error: ${xhr.statusText}`));
+          } catch (err) {
+            reject(new Error(`Server error: ${xhr.status} ${xhr.statusText}`));
+          }
+        }
+      };
+
+      xhr.onerror = () => {
+        reject(new Error("Network error or connection lost"));
+      };
+
+      xhr.onabort = () => {
+        reject(new Error("Upload aborted"));
+      };
+
+      xhr.upload.onloadend = () => {
+        showStatus("Transcribing... This may take a moment.");
+      };
+
+      xhr.open("POST", "/api/transcribe");
+      xhr.send(form);
+    })
+    .then((data) => {
       showResult(data);
-    } catch (err) {
+    })
+    .catch((err) => {
       showToast(err.message);
       hideStatus();
-    } finally {
+    })
+    .finally(() => {
       els.transcribeFileBtn.disabled = false;
       els.recordBtn.disabled = false;
       resetFileInput();
-    }
+    });
   }
 
   // --- Results ---
@@ -299,7 +339,7 @@
 
   function resetFileInput() {
     els.fileInput.value = "";
-    els.fileDropText.textContent = "Drop audio file or tap to browse";
+    els.fileDropText.textContent = "Drop audio/video file or tap to browse";
     els.fileName.classList.add("hidden");
     els.transcribeFileBtn.classList.add("hidden");
   }
