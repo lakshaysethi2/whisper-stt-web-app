@@ -7,7 +7,7 @@ A self-hosted speech-to-text web application powered by [faster-whisper](https:/
 ## Features
 
 - **Live recording** — Record audio directly in the browser
-- **File upload** — Upload MP3, WAV, M4A, FLAC, OGG, and more
+- **File upload** — Upload audio (MP3, WAV, M4A, FLAC, OGG, etc.) or video (MP4, AVI, MOV, MKV, etc.) files
 - **GPU-accelerated** — Runs on NVIDIA GPU with CUDA for maximum speed
 - **Auto-detection** — Automatically selects optimal compute type (float16/float32) based on GPU
 - **Mobile-first PWA** — Install on your phone like a native app
@@ -121,18 +121,18 @@ Environment variables:
 └─────────────────────┘     └──────────────────────────────┘
 ```
 
-## Supported Audio Formats
+## Supported Formats
 
-WAV, MP3, FLAC, OGG, M4A, AAC, WMA, OPUS, and any format supported by FFmpeg.
+Supports audio and video files including WAV, MP3, FLAC, OGG, M4A, AAC, WMA, OPUS, MP4, AVI, MOV, MKV, FLV, WMV, and any container format supported by FFmpeg.
 
 ## API
 
 ### `POST /api/transcribe`
 
-Upload an audio file for transcription.
+Upload an audio or video file for transcription.
 
 **Request:** `multipart/form-data`
-- `file` — Audio file (required)
+- `file` — Audio or video file (required)
 - `language` — Language code, e.g. `en`, `es`, `fr` (optional, defaults to `en`)
 
 **Response:** `application/json`

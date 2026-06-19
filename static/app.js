@@ -188,7 +188,10 @@
 
   function selectFile(file) {
     const ext = file.name.split(".").pop().toLowerCase();
-    const allowed = ["mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "webm", "mp4"];
+    const allowed = [
+      "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", // Audio
+      "mp4", "webm", "avi", "mov", "mkv", "flv", "wmv", "mpeg", "mpg", "3gp", "m4v", "asf" // Video
+    ];
     if (!allowed.includes(ext)) {
       showToast(`Unsupported format: .${ext}`);
       return;

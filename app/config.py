@@ -10,8 +10,13 @@ WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/whisper-stt"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {
+    # Audio formats
     ".mp3", ".wav", ".flac", ".ogg", ".m4a",
-    ".aac", ".wma", ".opus", ".webm", ".mp4",
+    ".aac", ".wma", ".opus",
+    # Video formats
+    ".mp4", ".webm", ".avi", ".mov", ".mkv",
+    ".flv", ".wmv", ".mpeg", ".mpg", ".3gp",
+    ".m4v", ".asf",
 }
 
 SUPPORTED_MODELS = [
