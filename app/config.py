@@ -39,3 +39,13 @@ def cleanup_job(job_id: str) -> None:
     d = WORK_DIR / job_id
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
+
+
+def cleanup_all_jobs() -> None:
+    if WORK_DIR.exists():
+        for p in WORK_DIR.iterdir():
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.is_file():
+                p.unlink(missing_ok=True)
+

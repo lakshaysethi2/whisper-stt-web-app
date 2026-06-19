@@ -21,7 +21,7 @@ services:
     volumes:
       - hf-cache:/cache
     tmpfs:
-      - /tmp/whisper-stt:size=500M,uid=1000,gid=1000
+      - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
     restart: unless-stopped
 
 volumes:

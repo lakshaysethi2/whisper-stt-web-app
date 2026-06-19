@@ -9,22 +9,67 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
 from pathlib import Path
+import shutil
+import time
 
 from app.config import (
     WHISPER_MODEL, WHISPER_LANGUAGE, MAX_FILE_SIZE,
     ALLOWED_EXTENSIONS, SUPPORTED_MODELS, get_job_dir, cleanup_job,
+    cleanup_all_jobs, WORK_DIR,
 )
 from app.transcriber import load_model, transcribe_audio, _device_info
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 VALID_LANG_RE = re.compile(r"^[a-z]{2}(-[a-zA-Z]{2,})?$")
 
 
+async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1800):
+    logger.info("Starting periodic cleanup task (interval=%ds, max_age=%ds)", interval_seconds, max_age_seconds)
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            now = time.time()
+            if WORK_DIR.exists():
+                for p in WORK_DIR.iterdir():
+                    if p.is_dir():
+                        mtime = p.stat().st_mtime
+                        if now - mtime > max_age_seconds:
+                            logger.info("Removing expired job directory: %s (age: %.1fs)", p.name, now - mtime)
+                            shutil.rmtree(p, ignore_errors=True)
+        except asyncio.CancelledError:
+            logger.info("Periodic cleanup task cancelled")
+            break
+        except Exception as e:
+            logger.error("Error in periodic cleanup task: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Perform startup cleanup of any stale files
+    try:
+        cleanup_all_jobs()
+        logger.info("Startup cleanup completed successfully.")
+    except Exception as e:
+        logger.error("Error during startup cleanup: %s", e)
+
+    # Start the background periodic cleanup task
+    cleanup_task = asyncio.create_task(periodic_cleanup())
+
     await asyncio.to_thread(load_model)
     yield
+
+    # Cancel the periodic cleanup task on shutdown
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
 
 
 app = FastAPI(title="Whisper STT", version="2.1.0", lifespan=lifespan)
