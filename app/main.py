@@ -1,14 +1,15 @@
 import asyncio
 import json
 import logging
+import math
 import re
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uuid
 from pathlib import Path
 import shutil
 import time
@@ -35,6 +36,12 @@ CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 # Per-request chunk ceiling. Cloudflare Free/Pro = 100 MB per request.
 # Keep chunks well below that to leave room for multipart overhead and headers.
 CHUNK_MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+
+# Recommended chunk size for clients.
+CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB
+
+# Maximum number of chunks, derived from max file size and recommended chunk size.
+MAX_CHUNKS = math.ceil(MAX_FILE_SIZE / CHUNK_SIZE)
 
 # Files under this size keep using the original single-request path.
 DIRECT_UPLOAD_THRESHOLD = 50 * 1024 * 1024  # 50 MB
@@ -158,9 +165,10 @@ async def list_models():
 @app.get("/api/upload/config")
 async def upload_config():
     return {
-        "chunk_size": 5 * 1024 * 1024,
+        "chunk_size": CHUNK_SIZE,
         "max_chunk_size": CHUNK_MAX_SIZE,
         "max_file_size": MAX_FILE_SIZE,
+        "max_chunks": MAX_CHUNKS,
         "direct_upload_threshold": DIRECT_UPLOAD_THRESHOLD,
         "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
     }
@@ -185,8 +193,25 @@ async def upload_start(
             f"File too large. Max: {MAX_FILE_SIZE // (1024 * 1024)} MB",
         )
 
+    if size < 1:
+        raise HTTPException(400, "File size must be at least 1 byte")
+
     if total_chunks < 1:
         raise HTTPException(400, "total_chunks must be at least 1")
+
+    expected_chunks = math.ceil(size / CHUNK_SIZE)
+    if total_chunks != expected_chunks:
+        raise HTTPException(
+            400,
+            f"Invalid total_chunks: expected {expected_chunks} for {size} bytes "
+            f"with chunk_size={CHUNK_SIZE}",
+        )
+
+    if total_chunks > MAX_CHUNKS:
+        raise HTTPException(
+            400,
+            f"Too many chunks: {total_chunks}. Max: {MAX_CHUNKS}",
+        )
 
     upload_id = str(uuid.uuid4())[:8]
     upload_dir = CHUNK_DIR / upload_id
@@ -230,7 +255,7 @@ async def upload_chunk(
         raise HTTPException(400, "Invalid chunk index")
 
     chunk_path = upload_dir / f"{chunk_index}.part"
-    tmp_path = upload_dir / f"{chunk_index}.part.tmp"
+    tmp_path = upload_dir / f"{chunk_index}.{uuid.uuid4().hex}.tmp"
     total_bytes = 0
 
     try:
@@ -285,6 +310,7 @@ async def upload_finish(
     _finish_locks.add(upload_id)
     job_id = None
     upload_dir = CHUNK_DIR / upload_id
+    success = False
 
     try:
         if not upload_dir.exists():
@@ -315,22 +341,41 @@ async def upload_finish(
                 },
             )
 
-        ext = Path(meta["filename"]).suffix.lower()
-        job_id = str(uuid.uuid4())[:8]
-        job_dir = get_job_dir(job_id)
-        file_path = job_dir / f"input{ext}"
-
-        with file_path.open("wb") as out:
-            for i in range(meta["total_chunks"]):
-                chunk_path = upload_dir / f"{i}.part"
-                with chunk_path.open("rb") as inp:
-                    shutil.copyfileobj(inp, out)
-
         lang = language or WHISPER_LANGUAGE or "en"
         if not VALID_LANG_RE.match(lang):
             raise HTTPException(
                 400,
                 f"Invalid language code: {lang}. Expected format: xx or xx-XX (e.g. en, en-US)",
+            )
+
+        ext = Path(meta["filename"]).suffix.lower()
+        job_id = str(uuid.uuid4())[:8]
+        job_dir = get_job_dir(job_id)
+        file_path = job_dir / f"input{ext}"
+
+        def assemble_chunks():
+            assembled_size = 0
+            with file_path.open("wb") as out:
+                for i in range(meta["total_chunks"]):
+                    chunk_path = upload_dir / f"{i}.part"
+                    assembled_size += chunk_path.stat().st_size
+                    if assembled_size > MAX_FILE_SIZE:
+                        raise HTTPException(
+                            413,
+                            f"Assembled file too large: {assembled_size} bytes "
+                            f"(max {MAX_FILE_SIZE})",
+                        )
+                    with chunk_path.open("rb") as inp:
+                        shutil.copyfileobj(inp, out)
+            return assembled_size
+
+        assembled_size = await asyncio.to_thread(assemble_chunks)
+
+        if assembled_size != meta["size"]:
+            raise HTTPException(
+                400,
+                f"Upload size mismatch: expected {meta['size']} bytes, "
+                f"got {assembled_size}",
             )
 
         logger.info(
@@ -344,6 +389,7 @@ async def upload_finish(
             job_id, len(result.get("segments", [])),
             result.get("duration", 0), result.get("process_time", 0),
         )
+        success = True
         return JSONResponse(result)
 
     except HTTPException:
@@ -356,7 +402,8 @@ async def upload_finish(
         _finish_locks.discard(upload_id)
         if job_id:
             cleanup_job(job_id)
-        shutil.rmtree(upload_dir, ignore_errors=True)
+        if success:
+            shutil.rmtree(upload_dir, ignore_errors=True)
 
 
 @app.post("/api/transcribe")

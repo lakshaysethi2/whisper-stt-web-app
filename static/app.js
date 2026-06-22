@@ -44,15 +44,18 @@
     }
 
     try {
-      const [modelsRes, configRes] = await Promise.all([
+      const [modelsResult, configResult] = await Promise.allSettled([
         fetch("/api/models"),
         fetch("/api/upload/config"),
       ]);
-      const modelsData = await modelsRes.json();
-      if (els.modelBadge) els.modelBadge.textContent = modelsData.current;
 
-      if (configRes.ok) {
-        const cfg = await configRes.json();
+      if (modelsResult.status === "fulfilled" && modelsResult.value.ok) {
+        const modelsData = await modelsResult.value.json();
+        if (els.modelBadge) els.modelBadge.textContent = modelsData.current;
+      }
+
+      if (configResult.status === "fulfilled" && configResult.value.ok) {
+        const cfg = await configResult.value.json();
         uploadConfig.chunkSize = cfg.chunk_size || uploadConfig.chunkSize;
         uploadConfig.directUploadThreshold = cfg.direct_upload_threshold || uploadConfig.directUploadThreshold;
       }
@@ -262,7 +265,7 @@
         } else {
           try {
             const err = JSON.parse(xhr.responseText);
-            reject(new Error(err.detail || `Server error: ${xhr.statusText}`));
+            reject(new Error(errorMessage(err, `Server error: ${xhr.statusText}`)));
           } catch (err) {
             reject(new Error(`Server error: ${xhr.status} ${xhr.statusText}`));
           }
@@ -306,7 +309,7 @@
         const res = await fetch(`/api/upload/chunk/${uploadId}`, { method: "POST", body: form });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || `Chunk ${chunkIndex + 1} failed: ${res.statusText}`);
+          throw new Error(errorMessage(err, `Chunk ${chunkIndex + 1} failed: ${res.statusText}`));
         }
         return await res.json();
       } catch (err) {
@@ -331,7 +334,7 @@
       const res = await fetch("/api/upload/start", { method: "POST", body: startForm });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `Start failed: ${res.statusText}`);
+        throw new Error(errorMessage(err, `Start failed: ${res.statusText}`));
       }
       const data = await res.json();
       uploadId = data.upload_id;
@@ -378,7 +381,7 @@
       const res = await fetch(`/api/upload/finish/${uploadId}`, { method: "POST", body: finishForm });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail?.message || err.detail || `Transcription failed: ${res.statusText}`);
+        throw new Error(errorMessage(err, `Transcription failed: ${res.statusText}`));
       }
       const data = await res.json();
       showResult(data);
@@ -449,6 +452,12 @@
   }
 
   // --- Utilities ---
+
+  function errorMessage(err, fallback) {
+    if (typeof err.detail === "string") return err.detail;
+    if (err.detail?.message) return err.detail.message;
+    return fallback;
+  }
 
   function showStatus(msg) {
     els.status.classList.remove("hidden");
