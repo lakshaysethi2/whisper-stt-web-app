@@ -436,13 +436,6 @@
     }
 
     resetUploadUI();
-      const data = await res.json();
-      showResult(data);
-    } catch (err) {
-      showToast(err.message);
-    } finally {
-      resetUploadUI();
-    }
   }
 
   function resetUploadUI() {
