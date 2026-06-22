@@ -254,6 +254,9 @@ async def upload_chunk(
     if chunk_index < 0 or chunk_index >= meta["total_chunks"]:
         raise HTTPException(400, "Invalid chunk index")
 
+    expected_start = chunk_index * CHUNK_SIZE
+    expected_size = min(CHUNK_SIZE, meta["size"] - expected_start)
+
     chunk_path = upload_dir / f"{chunk_index}.part"
     tmp_path = upload_dir / f"{chunk_index}.{uuid.uuid4().hex}.tmp"
     total_bytes = 0
@@ -273,7 +276,15 @@ async def upload_chunk(
                     )
                 buffer.write(chunk)
 
-        tmp_path.rename(chunk_path)
+        if total_bytes != expected_size:
+            tmp_path.unlink(missing_ok=True)
+            raise HTTPException(
+                400,
+                f"Invalid chunk size for index {chunk_index}: "
+                f"expected {expected_size} bytes, got {total_bytes}",
+            )
+
+        tmp_path.replace(chunk_path)
 
         received_count = sum(
             1 for i in range(meta["total_chunks"])

@@ -70,12 +70,12 @@ def test_missing_chunks_returns_detail_and_preserves_session():
         try:
             resp = client.post(
                 "/api/upload/start",
-                data={"filename": "test.wav", "size": 20, "total_chunks": math.ceil(20 / 10)},
+                data={"filename": "test.wav", "size": 30, "total_chunks": math.ceil(30 / 10)},
             )
             upload_id = resp.json()["upload_id"]
-            total_chunks = math.ceil(20 / 10)
+            total_chunks = math.ceil(30 / 10)
 
-            # Upload only chunks 0 and 2, skip chunk 1
+            # Upload chunks 0 and 2, skip chunk 1
             for i in [0, 2]:
                 client.post(
                     f"/api/upload/chunk/{upload_id}",
@@ -88,6 +88,7 @@ def test_missing_chunks_returns_detail_and_preserves_session():
             detail = resp.json()["detail"]
             assert "upload_id" in detail
             assert detail["total_chunks"] == total_chunks
+            assert 1 in detail["missing"]
 
             # Session must still exist on disk so client can upload missing chunks
             assert (CHUNK_DIR / upload_id).exists()
@@ -131,6 +132,7 @@ def test_size_mismatch_rejected():
     with patch("app.main.CHUNK_SIZE", 10), patch("app.main.MAX_CHUNKS", 100):
         upload_id = None
         try:
+            # Declare size=20 but actually upload 30 bytes total
             resp = client.post(
                 "/api/upload/start",
                 data={"filename": "test.wav", "size": 20, "total_chunks": math.ceil(20 / 10)},
@@ -138,13 +140,19 @@ def test_size_mismatch_rejected():
             upload_id = resp.json()["upload_id"]
             total_chunks = math.ceil(20 / 10)
 
-            # Upload wrong amount of data
+            # Upload first chunk at correct size, second at correct size for its index
+            # but the last chunk gets extra data to cause a mismatch
             for i in range(total_chunks):
+                expected = min(10, 20 - i * 10)
                 client.post(
                     f"/api/upload/chunk/{upload_id}",
                     data={"chunk_index": i},
-                    files={"file": (f"test.wav.part{i}", b"X" * 5, "audio/wav")},
+                    files={"file": (f"test.wav.part{i}", b"X" * expected, "audio/wav")},
                 )
+
+            # Tamper: overwrite chunk 0 with larger data directly
+            chunk0 = CHUNK_DIR / upload_id / "0.part"
+            chunk0.write_bytes(b"X" * 20)
 
             with patch("app.main.transcribe_audio"):
                 resp = client.post(f"/api/upload/finish/{upload_id}", data={"language": "en"})
@@ -164,6 +172,40 @@ def test_invalid_total_chunks_rejected():
         )
         assert resp.status_code == 400
         assert "Invalid total_chunks" in resp.json()["detail"]
+
+
+def test_chunk_wrong_size_rejected():
+    """Each chunk must match its expected byte length."""
+    with patch("app.main.CHUNK_SIZE", 10), patch("app.main.MAX_CHUNKS", 100):
+        upload_id = None
+        try:
+            # size=25, total_chunks=ceil(25/10)=3. Chunk 0 expects 10 bytes.
+            resp = client.post(
+                "/api/upload/start",
+                data={"filename": "test.wav", "size": 25, "total_chunks": math.ceil(25 / 10)},
+            )
+            assert resp.status_code == 200
+            upload_id = resp.json()["upload_id"]
+
+            # Upload 15 bytes for chunk 0 (expected 10) — should be rejected
+            resp = client.post(
+                f"/api/upload/chunk/{upload_id}",
+                data={"chunk_index": 0},
+                files={"file": ("test.wav.part0", b"X" * 15, "audio/wav")},
+            )
+            assert resp.status_code == 400
+            assert "Invalid chunk size" in resp.json()["detail"]
+
+            # Upload correct 10 bytes for chunk 0 — should succeed
+            resp = client.post(
+                f"/api/upload/chunk/{upload_id}",
+                data={"chunk_index": 0},
+                files={"file": ("test.wav.part0", b"X" * 10, "audio/wav")},
+            )
+            assert resp.status_code == 200
+        finally:
+            if upload_id:
+                _cleanup_upload(upload_id)
 
 
 def test_chunk_too_large():
