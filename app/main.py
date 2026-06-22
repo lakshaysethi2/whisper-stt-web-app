@@ -281,40 +281,40 @@ async def upload_finish(
 ):
     if upload_id in _finish_locks:
         raise HTTPException(409, "Upload is already being finalized")
+
     _finish_locks.add(upload_id)
-
-    upload_dir = CHUNK_DIR / upload_id
-    if not upload_dir.exists():
-        raise HTTPException(404, "Upload session not found")
-
-    meta_path = upload_dir / "meta.json"
-    if not meta_path.exists():
-        raise HTTPException(404, "Upload session metadata missing")
-
-    try:
-        meta = json.loads(meta_path.read_text())
-    except Exception:
-        raise HTTPException(500, "Failed to read upload metadata")
-
-    missing = [
-        i for i in range(meta["total_chunks"])
-        if not (upload_dir / f"{i}.part").exists()
-    ]
-    if missing:
-        raise HTTPException(
-            400,
-            detail={
-                "message": f"Missing chunks: {missing}",
-                "upload_id": upload_id,
-                "total_chunks": meta["total_chunks"],
-                "received": meta["total_chunks"] - len(missing),
-                "missing": missing,
-            },
-        )
-
     job_id = None
+    upload_dir = CHUNK_DIR / upload_id
 
     try:
+        if not upload_dir.exists():
+            raise HTTPException(404, "Upload session not found")
+
+        meta_path = upload_dir / "meta.json"
+        if not meta_path.exists():
+            raise HTTPException(404, "Upload session metadata missing")
+
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            raise HTTPException(500, "Failed to read upload metadata")
+
+        missing = [
+            i for i in range(meta["total_chunks"])
+            if not (upload_dir / f"{i}.part").exists()
+        ]
+        if missing:
+            raise HTTPException(
+                400,
+                detail={
+                    "message": f"Missing chunks: {missing}",
+                    "upload_id": upload_id,
+                    "total_chunks": meta["total_chunks"],
+                    "received": meta["total_chunks"] - len(missing),
+                    "missing": missing,
+                },
+            )
+
         ext = Path(meta["filename"]).suffix.lower()
         job_id = str(uuid.uuid4())[:8]
         job_dir = get_job_dir(job_id)
