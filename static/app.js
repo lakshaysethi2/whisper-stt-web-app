@@ -206,10 +206,20 @@
 
   // --- Upload & Transcribe ---
 
+  const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
+  const DIRECT_UPLOAD_THRESHOLD = 50 * 1024 * 1024; // 50 MB
+
   function uploadFile(file) {
     els.transcribeFileBtn.disabled = true;
     els.recordBtn.disabled = true;
 
+    if (file.size <= DIRECT_UPLOAD_THRESHOLD) {
+      return directUpload(file);
+    }
+    return chunkedUpload(file);
+  }
+
+  function directUpload(file) {
     const form = new FormData();
     form.append("file", file);
     if (els.language.value) form.append("language", els.language.value);
@@ -267,10 +277,85 @@
       hideStatus();
     })
     .finally(() => {
-      els.transcribeFileBtn.disabled = false;
-      els.recordBtn.disabled = false;
-      resetFileInput();
+      resetUploadUI();
     });
+  }
+
+  async function chunkedUpload(file) {
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+
+    // Start upload session
+    const startForm = new FormData();
+    startForm.append("filename", file.name);
+    startForm.append("size", file.size);
+    startForm.append("total_chunks", totalChunks);
+
+    let uploadId;
+    try {
+      const res = await fetch("/api/upload/start", { method: "POST", body: startForm });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Start failed: ${res.statusText}`);
+      }
+      const data = await res.json();
+      uploadId = data.upload_id;
+    } catch (err) {
+      showToast(err.message);
+      resetUploadUI();
+      return;
+    }
+
+    // Upload chunks sequentially
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, file.size);
+      const chunk = file.slice(start, end);
+
+      const form = new FormData();
+      form.append("chunk_index", i);
+      form.append("file", chunk, `${file.name}.part${i}`);
+
+      try {
+        const chunkNum = i + 1;
+        showStatus(`Uploading ${sizeMB} MB file: chunk ${chunkNum}/${totalChunks}...`);
+        const res = await fetch(`/api/upload/chunk/${uploadId}`, { method: "POST", body: form });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `Chunk ${chunkNum} failed: ${res.statusText}`);
+        }
+      } catch (err) {
+        showToast(err.message);
+        resetUploadUI();
+        return;
+      }
+    }
+
+    // Finish and transcribe
+    const finishForm = new FormData();
+    if (els.language.value) finishForm.append("language", els.language.value);
+
+    try {
+      showStatus("Transcribing... This may take a moment.");
+      const res = await fetch(`/api/upload/finish/${uploadId}`, { method: "POST", body: finishForm });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Transcription failed: ${res.statusText}`);
+      }
+      const data = await res.json();
+      showResult(data);
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      resetUploadUI();
+    }
+  }
+
+  function resetUploadUI() {
+    els.transcribeFileBtn.disabled = false;
+    els.recordBtn.disabled = false;
+    resetFileInput();
+    hideStatus();
   }
 
   // --- Results ---

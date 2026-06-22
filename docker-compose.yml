@@ -3,11 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
+      network: host
+    network_mode: host
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
       - HF_TOKEN=${HF_TOKEN}
       - HF_HOME=/cache
