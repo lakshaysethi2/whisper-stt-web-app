@@ -208,6 +208,9 @@
 
   const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
   const DIRECT_UPLOAD_THRESHOLD = 50 * 1024 * 1024; // 50 MB
+  const MAX_CONCURRENT_CHUNKS = 4;
+  const MAX_CHUNK_RETRIES = 3;
+  const RETRY_BASE_DELAY_MS = 1000;
 
   function uploadFile(file) {
     els.transcribeFileBtn.disabled = true;
@@ -281,11 +284,31 @@
     });
   }
 
+  async function uploadChunkWithRetry(uploadId, chunkIndex, chunk, fileName, totalChunks) {
+    for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
+      try {
+        const form = new FormData();
+        form.append("chunk_index", chunkIndex);
+        form.append("file", chunk, `${fileName}.part${chunkIndex}`);
+
+        const res = await fetch(`/api/upload/chunk/${uploadId}`, { method: "POST", body: form });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `Chunk ${chunkIndex + 1} failed: ${res.statusText}`);
+        }
+        return await res.json();
+      } catch (err) {
+        if (attempt === MAX_CHUNK_RETRIES) throw err;
+        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+
   async function chunkedUpload(file) {
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
 
-    // Start upload session
     const startForm = new FormData();
     startForm.append("filename", file.name);
     startForm.append("size", file.size);
@@ -306,32 +329,34 @@
       return;
     }
 
-    // Upload chunks sequentially
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, file.size);
-      const chunk = file.slice(start, end);
+    let completedChunks = 0;
 
-      const form = new FormData();
-      form.append("chunk_index", i);
-      form.append("file", chunk, `${file.name}.part${i}`);
-
-      try {
-        const chunkNum = i + 1;
-        showStatus(`Uploading ${sizeMB} MB file: chunk ${chunkNum}/${totalChunks}...`);
-        const res = await fetch(`/api/upload/chunk/${uploadId}`, { method: "POST", body: form });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || `Chunk ${chunkNum} failed: ${res.statusText}`);
-        }
-      } catch (err) {
-        showToast(err.message);
-        resetUploadUI();
-        return;
-      }
+    async function uploadChunkBatch(indices) {
+      return Promise.all(
+        indices.map((i) => {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunk = file.slice(start, end);
+          return uploadChunkWithRetry(uploadId, i, chunk, file.name, totalChunks).then(() => {
+            completedChunks++;
+            showStatus(`Uploading ${sizeMB} MB file: ${completedChunks}/${totalChunks} chunks...`);
+          });
+        })
+      );
     }
 
-    // Finish and transcribe
+    try {
+      for (let batchStart = 0; batchStart < totalChunks; batchStart += MAX_CONCURRENT_CHUNKS) {
+        const batchEnd = Math.min(batchStart + MAX_CONCURRENT_CHUNKS, totalChunks);
+        const indices = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i);
+        await uploadChunkBatch(indices);
+      }
+    } catch (err) {
+      showToast(err.message);
+      resetUploadUI();
+      return;
+    }
+
     const finishForm = new FormData();
     if (els.language.value) finishForm.append("language", els.language.value);
 
@@ -340,7 +365,7 @@
       const res = await fetch(`/api/upload/finish/${uploadId}`, { method: "POST", body: finishForm });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `Transcription failed: ${res.statusText}`);
+        throw new Error(err.detail?.message || err.detail || `Transcription failed: ${res.statusText}`);
       }
       const data = await res.json();
       showResult(data);
