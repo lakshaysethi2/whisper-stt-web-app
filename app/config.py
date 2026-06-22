@@ -44,7 +44,9 @@ def cleanup_job(job_id: str) -> None:
 def cleanup_all_jobs() -> None:
     if WORK_DIR.exists():
         for p in WORK_DIR.iterdir():
-            if p.is_dir():
+            # Preserve the chunked-upload sessions directory; it is cleaned
+            # by its own logic in app.main.
+            if p.is_dir() and p.name != "chunks":
                 shutil.rmtree(p, ignore_errors=True)
             elif p.is_file():
                 p.unlink(missing_ok=True)
