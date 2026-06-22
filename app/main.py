@@ -12,7 +12,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import shutil
-import threading
 import time
 
 from app.config import (
@@ -53,7 +52,10 @@ _finish_locks: set[str] = set()
 # In-memory store of running/completed transcription jobs.
 # Format: job_id -> {status, progress, result?, error?, created_at}
 _jobs: dict[str, dict] = {}
-_jobs_lock = threading.Lock()
+_jobs_lock: asyncio.Lock = asyncio.Lock()
+# Track running transcription tasks so they aren't garbage-collected
+# and can be awaited/cancelled on shutdown.
+_tasks: set[asyncio.Task] = set()
 JOB_MAX_AGE_SECONDS = 30 * 60  # 30 minutes
 
 
@@ -102,7 +104,7 @@ async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1
             try:
                 now_ts = now
                 stale = []
-                with _jobs_lock:
+                async with _jobs_lock:
                     for jid, jstate in list(_jobs.items()):
                         if now_ts - jstate.get("created_at", 0) > JOB_MAX_AGE_SECONDS:
                             stale.append(jid)
@@ -145,8 +147,18 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    # Give any in-flight transcription tasks a chance to finish cleanly.
+    if _tasks:
+        logger.info("Awaiting %d in-flight transcription task(s) before shutdown", len(_tasks))
+        try:
+            await asyncio.wait_for(asyncio.gather(*_tasks, return_exceptions=True), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning("Transcription tasks did not finish within 30s; cancelling")
+            for t in _tasks:
+                t.cancel()
 
-app = FastAPI(title="Whisper STT", version="2.2.0", lifespan=lifespan)
+
+app = FastAPI(title="Whisper STT", version="3.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -419,7 +431,7 @@ async def upload_finish(
 
         # Register the job BEFORE spawning the background task so a fast-polling
         # client cannot see "not found" between spawn and registration.
-        with _jobs_lock:
+        async with _jobs_lock:
             _jobs[job_id] = {
                 "status": "processing",
                 "progress": 0.0,
@@ -439,7 +451,7 @@ async def upload_finish(
                     job_id, len(result.get("segments", [])),
                     result.get("duration", 0), result.get("process_time", 0),
                 )
-                with _jobs_lock:
+                async with _jobs_lock:
                     _jobs[job_id] = {
                         "status": "completed",
                         "progress": 1.0,
@@ -448,7 +460,7 @@ async def upload_finish(
                     }
             except Exception as e:
                 logger.error("Transcription failed job=%s error=%s", job_id, str(e))
-                with _jobs_lock:
+                async with _jobs_lock:
                     _jobs[job_id] = {
                         "status": "failed",
                         "error": str(e),
@@ -457,7 +469,9 @@ async def upload_finish(
             finally:
                 cleanup_job(job_id)
 
-        asyncio.create_task(_run_transcription())
+        task = asyncio.create_task(_run_transcription())
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
 
         success = True
         return JSONResponse({
@@ -480,7 +494,7 @@ async def upload_finish(
 @app.get("/api/transcribe/status/{job_id}")
 async def transcribe_status(job_id: str):
     """Poll for the status / result of a transcription job spawned by /finish."""
-    with _jobs_lock:
+    async with _jobs_lock:
         job = _jobs.get(job_id)
     if job is None:
         raise HTTPException(404, "Job not found (or expired)")
@@ -492,8 +506,10 @@ async def transcribe_status(job_id: str):
         "elapsed_seconds": round(elapsed, 1),
     }
     if job["status"] == "processing":
-        # crude progress hint: cap at 0.9 so the UI doesn't look "done" until completed
-        response["progress"] = min(0.9, elapsed / max(1.0, job.get("expected_seconds", 60.0)))
+        # crude progress hint: cap at 0.9 so the UI doesn't look "done" until completed.
+        # Without a real estimate, we just tick up slowly so the UI shows motion.
+        # ~0.9 at 60s elapsed is a reasonable default for English audio.
+        response["progress"] = min(0.9, elapsed / 60.0)
     elif job["status"] == "completed":
         response["progress"] = 1.0
         response["result"] = job["result"]
