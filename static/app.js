@@ -376,20 +376,66 @@
     const finishForm = new FormData();
     if (els.language.value) finishForm.append("language", els.language.value);
 
+    const langParam = els.language.value ? `?language=${encodeURIComponent(els.language.value)}` : "";
+
+    let jobId;
     try {
-      showStatus("Transcribing... This may take a moment.");
-      const res = await fetch(`/api/upload/finish/${uploadId}`, { method: "POST", body: finishForm });
+      showStatus("Finalising upload...");
+      const res = await fetch(`/api/upload/finish/${uploadId}${langParam}`, { method: "POST" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(errorMessage(err, `Transcription failed: ${res.statusText}`));
+        throw new Error(errorMessage(err, `Finalise failed: ${res.statusText}`));
       }
       const data = await res.json();
-      showResult(data);
+      jobId = data.job_id;
+      if (!jobId) throw new Error("Server did not return a job_id");
     } catch (err) {
       showToast(err.message);
-    } finally {
       resetUploadUI();
+      return;
     }
+
+    // Poll for completion
+    showStatus("Transcribing... This may take several minutes for long files.");
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const pollStart = Date.now();
+
+    while (true) {
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        showToast("Transcription timed out after 30 minutes. The server may still finish — refresh and try again later.");
+        resetUploadUI();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      let status;
+      try {
+        const r = await fetch(`/api/transcribe/status/${jobId}`);
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          throw new Error(errorMessage(err, `Status check failed: ${r.statusText}`));
+        }
+        status = await r.json();
+      } catch (err) {
+        // network blip — keep polling up to POLL_TIMEOUT_MS
+        console.warn("status poll error:", err);
+        continue;
+      }
+      if (status.status === "completed") {
+        showResult(status.result);
+        break;
+      }
+      if (status.status === "failed") {
+        showToast(`Transcription failed: ${status.error || "unknown error"}`);
+        break;
+      }
+      // status === "processing" — update UI
+      const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
+      const pct = Math.round((status.progress || 0) * 100);
+      showStatus(`Transcribing... ${elapsed}s elapsed (${pct}%)`);
+    }
+
+    resetUploadUI();
   }
 
   function resetUploadUI() {

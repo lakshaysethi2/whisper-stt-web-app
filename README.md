@@ -208,10 +208,45 @@ Upload a single chunk. Client uploads chunks in parallel batches of 4, with retr
 
 Finalize upload and begin transcription. Reassembles chunks and runs Whisper. Only one finish call per upload is allowed (concurrent calls return 409).
 
+> **Breaking change since v3.0.0:** `POST /api/upload/finish/{upload_id}`
+> no longer returns the transcription result. It returns `{ job_id, status,
+> progress }` immediately; poll `GET /api/transcribe/status/{job_id}` for
+> the result.
+
 **Request:** `multipart/form-data`
 - `language` — Language code (optional, defaults to `en`)
 
-**Response:** Same as `POST /api/transcribe`.
+**Response:** `application/json`
+```json
+{
+  "job_id": "abc12345",
+  "status": "processing",
+  "progress": 0.0
+}
+```
+
+### `GET /api/transcribe/status/{job_id}`
+
+Poll the status of a chunked-upload transcription job. `POST /api/upload/finish/{upload_id}`
+returns a `job_id` immediately (well under Cloudflare's 100 s response timeout); poll this
+endpoint every 2 seconds until `status` is `completed` or `failed`.
+
+**Response:** `application/json`
+
+```json
+{
+  "job_id": "abc12345",
+  "status": "processing",
+  "progress": 0.3,
+  "elapsed_seconds": 12.4
+}
+```
+
+When `status` is `"completed"`, a `result` field is included with the full transcription
+(text, segments, language, duration, etc.). When `status` is `"failed"`, an `error` field
+is included.
+
+Jobs expire from the in-memory store 30 minutes after creation.
 
 ### `GET /health`
 
