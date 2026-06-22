@@ -208,6 +208,11 @@ Upload a single chunk. Client uploads chunks in parallel batches of 4, with retr
 
 Finalize upload and begin transcription. Reassembles chunks and runs Whisper. Only one finish call per upload is allowed (concurrent calls return 409).
 
+> **Breaking change since v3.0.0:** `POST /api/upload/finish/{upload_id}`
+> no longer returns the transcription result. It returns `{ job_id, status,
+> progress }` immediately; poll `GET /api/transcribe/status/{job_id}` for
+> the result.
+
 **Request:** `multipart/form-data`
 - `language` — Language code (optional, defaults to `en`)
 
