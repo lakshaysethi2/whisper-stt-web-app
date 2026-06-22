@@ -373,12 +373,10 @@
       return;
     }
 
-    const finishForm = new FormData();
-    if (els.language.value) finishForm.append("language", els.language.value);
-
     try {
       showStatus("Transcribing... This may take a moment.");
-      const res = await fetch(`/api/upload/finish/${uploadId}`, { method: "POST", body: finishForm });
+      const langParam = els.language.value ? `?language=${encodeURIComponent(els.language.value)}` : "";
+      const res = await fetch(`/api/upload/finish/${uploadId}${langParam}`, { method: "POST" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(errorMessage(err, `Transcription failed: ${res.statusText}`));
