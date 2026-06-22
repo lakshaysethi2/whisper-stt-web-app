@@ -152,6 +152,8 @@ def test_upload_config():
     assert resp.status_code == 200
     data = resp.json()
     assert "chunk_size" in data
+    assert data["chunk_size"] == 5 * 1024 * 1024
+    assert "max_chunk_size" in data
     assert "max_file_size" in data
     assert "direct_upload_threshold" in data
     assert "allowed_extensions" in data

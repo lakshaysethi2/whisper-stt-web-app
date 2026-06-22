@@ -52,40 +52,43 @@ async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1
             if not WORK_DIR.exists():
                 continue
 
-            for p in WORK_DIR.iterdir():
-                if not p.is_dir():
-                    continue
+            for p in list(WORK_DIR.iterdir()):
+                try:
+                    if not p.is_dir():
+                        continue
 
-                # Chunked upload sessions are kept under WORK_DIR/chunks.
-                # Clean individual upload sessions, not the whole container.
-                if p.name == "chunks":
-                    for cp in p.iterdir():
-                        if not cp.is_dir():
-                            continue
-                        meta_path = cp / "meta.json"
-                        created = cp.stat().st_mtime
-                        if meta_path.exists():
+                    if p.name == "chunks":
+                        for cp in list(p.iterdir()):
                             try:
-                                meta = json.loads(meta_path.read_text())
-                                created = meta.get("created", created)
-                            except Exception:
-                                pass
-                        if now - created > max_age_seconds:
-                            logger.info("Removing expired chunk session: %s (age: %.1fs)", cp.name, now - created)
-                            shutil.rmtree(cp, ignore_errors=True)
-                    continue
+                                if not cp.is_dir():
+                                    continue
+                                meta_path = cp / "meta.json"
+                                created = cp.stat().st_mtime
+                                if meta_path.exists():
+                                    try:
+                                        meta = json.loads(meta_path.read_text())
+                                        created = meta.get("created", created)
+                                    except Exception:
+                                        pass
+                                if now - created > max_age_seconds:
+                                    logger.info("Removing expired chunk session: %s (age: %.1fs)", cp.name, now - created)
+                                    shutil.rmtree(cp, ignore_errors=True)
+                            except Exception as cp_err:
+                                logger.error("Error cleaning up chunk session %s: %s", cp.name, cp_err)
+                        continue
 
-                # Normal transcription job directories
-                mtime = p.stat().st_mtime
-                if now - mtime > max_age_seconds:
-                    logger.info("Removing expired job directory: %s (age: %.1fs)", p.name, now - mtime)
-                    shutil.rmtree(p, ignore_errors=True)
+                    mtime = p.stat().st_mtime
+                    if now - mtime > max_age_seconds:
+                        logger.info("Removing expired job directory: %s (age: %.1fs)", p.name, now - mtime)
+                        shutil.rmtree(p, ignore_errors=True)
+                except Exception as p_err:
+                    logger.error("Error checking path %s during cleanup: %s", p.name, p_err)
 
         except asyncio.CancelledError:
             logger.info("Periodic cleanup task cancelled")
             break
         except Exception as e:
-            logger.error("Error in periodic cleanup task: %s", e)
+            logger.error("Unexpected error in periodic cleanup loop: %s", e)
 
 
 @asynccontextmanager
@@ -155,7 +158,8 @@ async def list_models():
 @app.get("/api/upload/config")
 async def upload_config():
     return {
-        "chunk_size": CHUNK_MAX_SIZE,
+        "chunk_size": 5 * 1024 * 1024,
+        "max_chunk_size": CHUNK_MAX_SIZE,
         "max_file_size": MAX_FILE_SIZE,
         "direct_upload_threshold": DIRECT_UPLOAD_THRESHOLD,
         "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
@@ -192,7 +196,6 @@ async def upload_start(
         "filename": filename,
         "size": size,
         "total_chunks": total_chunks,
-        "received": [],
         "created": time.time(),
     }
     (upload_dir / "meta.json").write_text(json.dumps(meta))
@@ -227,26 +230,30 @@ async def upload_chunk(
         raise HTTPException(400, "Invalid chunk index")
 
     chunk_path = upload_dir / f"{chunk_index}.part"
+    tmp_path = upload_dir / f"{chunk_index}.part.tmp"
     total_bytes = 0
 
     try:
-        with chunk_path.open("wb") as buffer:
+        with tmp_path.open("wb") as buffer:
             while True:
-                chunk = await file.read(1024 * 1024)  # 1 MB at a time
+                chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
                 total_bytes += len(chunk)
                 if total_bytes > CHUNK_MAX_SIZE:
-                    chunk_path.unlink(missing_ok=True)
+                    tmp_path.unlink(missing_ok=True)
                     raise HTTPException(
                         413,
                         f"Chunk too large. Max: {CHUNK_MAX_SIZE // (1024 * 1024)} MB",
                     )
                 buffer.write(chunk)
 
-        if chunk_index not in meta["received"]:
-            meta["received"].append(chunk_index)
-            meta_path.write_text(json.dumps(meta))
+        tmp_path.rename(chunk_path)
+
+        received_count = sum(
+            1 for i in range(meta["total_chunks"])
+            if (upload_dir / f"{i}.part").exists()
+        )
 
         logger.info(
             "Received chunk upload=%s index=%d size=%d",
@@ -254,13 +261,15 @@ async def upload_chunk(
         )
         return {
             "ok": True,
-            "received": len(meta["received"]),
+            "received": received_count,
             "total": meta["total_chunks"],
         }
 
     except HTTPException:
+        tmp_path.unlink(missing_ok=True)
         raise
     except Exception as e:
+        tmp_path.unlink(missing_ok=True)
         logger.error("Chunk upload failed upload=%s index=%d error=%s", upload_id, chunk_index, str(e))
         raise HTTPException(500, f"Chunk upload failed: {str(e)}")
 
@@ -272,6 +281,7 @@ async def upload_finish(
 ):
     if upload_id in _finish_locks:
         raise HTTPException(409, "Upload is already being finalized")
+    _finish_locks.add(upload_id)
 
     upload_dir = CHUNK_DIR / upload_id
     if not upload_dir.exists():
@@ -286,7 +296,10 @@ async def upload_finish(
     except Exception:
         raise HTTPException(500, "Failed to read upload metadata")
 
-    missing = [i for i in range(meta["total_chunks"]) if i not in meta["received"]]
+    missing = [
+        i for i in range(meta["total_chunks"])
+        if not (upload_dir / f"{i}.part").exists()
+    ]
     if missing:
         raise HTTPException(
             400,
@@ -294,19 +307,19 @@ async def upload_finish(
                 "message": f"Missing chunks: {missing}",
                 "upload_id": upload_id,
                 "total_chunks": meta["total_chunks"],
-                "received": len(meta["received"]),
+                "received": meta["total_chunks"] - len(missing),
                 "missing": missing,
             },
         )
 
-    _finish_locks.add(upload_id)
-    ext = Path(meta["filename"]).suffix.lower()
-    job_id = str(uuid.uuid4())[:8]
-    job_dir = get_job_dir(job_id)
-    file_path = job_dir / f"input{ext}"
+    job_id = None
 
     try:
-        # Reassemble chunks in order
+        ext = Path(meta["filename"]).suffix.lower()
+        job_id = str(uuid.uuid4())[:8]
+        job_dir = get_job_dir(job_id)
+        file_path = job_dir / f"input{ext}"
+
         with file_path.open("wb") as out:
             for i in range(meta["total_chunks"]):
                 chunk_path = upload_dir / f"{i}.part"
@@ -336,12 +349,13 @@ async def upload_finish(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Transcription failed job=%s error=%s", job_id, str(e))
+        logger.error("Transcription failed job=%s error=%s", job_id or "unknown", str(e))
         raise HTTPException(500, f"Transcription failed: {str(e)}")
 
     finally:
         _finish_locks.discard(upload_id)
-        cleanup_job(job_id)
+        if job_id:
+            cleanup_job(job_id)
         shutil.rmtree(upload_dir, ignore_errors=True)
 
 

@@ -31,6 +31,11 @@
     modelBadge: $("#model-badge"),
   };
 
+  const uploadConfig = {
+    chunkSize: 5 * 1024 * 1024,
+    directUploadThreshold: 50 * 1024 * 1024,
+  };
+
   init();
 
   async function init() {
@@ -39,9 +44,18 @@
     }
 
     try {
-      const res = await fetch("/api/models");
-      const data = await res.json();
-      if (els.modelBadge) els.modelBadge.textContent = data.current;
+      const [modelsRes, configRes] = await Promise.all([
+        fetch("/api/models"),
+        fetch("/api/upload/config"),
+      ]);
+      const modelsData = await modelsRes.json();
+      if (els.modelBadge) els.modelBadge.textContent = modelsData.current;
+
+      if (configRes.ok) {
+        const cfg = await configRes.json();
+        uploadConfig.chunkSize = cfg.chunk_size || uploadConfig.chunkSize;
+        uploadConfig.directUploadThreshold = cfg.direct_upload_threshold || uploadConfig.directUploadThreshold;
+      }
     } catch {}
 
     setupRecording();
@@ -206,8 +220,6 @@
 
   // --- Upload & Transcribe ---
 
-  const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB per chunk
-  const DIRECT_UPLOAD_THRESHOLD = 50 * 1024 * 1024; // 50 MB
   const MAX_CONCURRENT_CHUNKS = 4;
   const MAX_CHUNK_RETRIES = 3;
   const RETRY_BASE_DELAY_MS = 1000;
@@ -216,7 +228,7 @@
     els.transcribeFileBtn.disabled = true;
     els.recordBtn.disabled = true;
 
-    if (file.size <= DIRECT_UPLOAD_THRESHOLD) {
+    if (file.size <= uploadConfig.directUploadThreshold) {
       return directUpload(file);
     }
     return chunkedUpload(file);
@@ -306,7 +318,7 @@
   }
 
   async function chunkedUpload(file) {
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const totalChunks = Math.ceil(file.size / uploadConfig.chunkSize);
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
 
     const startForm = new FormData();
@@ -330,27 +342,28 @@
     }
 
     let completedChunks = 0;
+    let nextChunkIndex = 0;
 
-    async function uploadChunkBatch(indices) {
-      return Promise.all(
-        indices.map((i) => {
-          const start = i * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, file.size);
-          const chunk = file.slice(start, end);
-          return uploadChunkWithRetry(uploadId, i, chunk, file.name, totalChunks).then(() => {
-            completedChunks++;
-            showStatus(`Uploading ${sizeMB} MB file: ${completedChunks}/${totalChunks} chunks...`);
-          });
-        })
-      );
+    async function worker() {
+      while (nextChunkIndex < totalChunks) {
+        const i = nextChunkIndex++;
+        const start = i * uploadConfig.chunkSize;
+        const end = Math.min(start + uploadConfig.chunkSize, file.size);
+        const chunk = file.slice(start, end);
+
+        await uploadChunkWithRetry(uploadId, i, chunk, file.name, totalChunks);
+        completedChunks++;
+        showStatus(`Uploading ${sizeMB} MB file: ${completedChunks}/${totalChunks} chunks...`);
+      }
     }
 
     try {
-      for (let batchStart = 0; batchStart < totalChunks; batchStart += MAX_CONCURRENT_CHUNKS) {
-        const batchEnd = Math.min(batchStart + MAX_CONCURRENT_CHUNKS, totalChunks);
-        const indices = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i);
-        await uploadChunkBatch(indices);
+      const workers = [];
+      const concurrency = Math.min(MAX_CONCURRENT_CHUNKS, totalChunks);
+      for (let w = 0; w < concurrency; w++) {
+        workers.push(worker());
       }
+      await Promise.all(workers);
     } catch (err) {
       showToast(err.message);
       resetUploadUI();
