@@ -2,15 +2,15 @@ import asyncio
 import logging
 import time
 
-from faster_whisper import WhisperModel, BatchedInferencePipeline
+from faster_whisper import WhisperModel
 
 from app.config import WHISPER_MODEL, get_job_dir
 
 logger = logging.getLogger(__name__)
 
 _model = None
-_batched = None
 _device_info = {}
+_use_batched = False
 
 
 def _get_gpu_info() -> dict:
@@ -51,26 +51,19 @@ def _gpu_name_to_cc(name: str) -> int:
 
 
 def _detect_device() -> tuple[str, str, int]:
-    """Detect the best device and compute type for the available GPU.
-
-    Returns (device, compute_type, compute_capability_x10).
-    Compute capability is reported as integer (e.g., 50 for CC 5.0).
-    """
+    """Detect GPU and compute type. GPU-only — raises if no CUDA available."""
     try:
         import ctypes
         ctypes.CDLL("libcuda.so.1")
     except OSError:
         try:
-            import ctypes
             ctypes.CDLL("libcuda.so")
         except OSError:
-            logger.info("No CUDA library found, using CPU int8")
-            return "cpu", "int8", 0
+            raise RuntimeError("No CUDA library found — GPU is required")
 
     gpu_info = _get_gpu_info()
     if not gpu_info:
-        logger.warning("CUDA found but nvidia-smi failed, falling back to CPU int8")
-        return "cpu", "int8", 0
+        raise RuntimeError("nvidia-smi failed — cannot detect GPU")
 
     device_name = gpu_info["name"]
     vram_mb = gpu_info["vram_mb"]
@@ -85,50 +78,29 @@ def _detect_device() -> tuple[str, str, int]:
     elif cc_major >= 5:
         compute_type = "float32"
     else:
-        logger.warning("GPU CC %d.%d too old for CUDA kernels, falling back to CPU", cc_major, cc_minor)
-        return "cpu", "int8", cc_int
+        raise RuntimeError(f"GPU CC {cc_major}.{cc_minor} too old for CUDA kernels")
 
     return "cuda", compute_type, cc_int
 
 
 def load_model():
-    global _model, _batched, _device_info
+    global _model, _device_info, _use_batched
     if _model is not None:
         return
 
     device, compute_type, cc = _detect_device()
     _device_info.update({"device": device, "compute_type": compute_type, "compute_capability": cc})
+    _use_batched = cc >= 70
 
-    logger.info("Loading model %s on %s (%s)...", WHISPER_MODEL, device, compute_type)
+    logger.info("Loading model %s on %s (%s, batched=%s)...", WHISPER_MODEL, device, compute_type, _use_batched)
 
-    try:
-        _model = WhisperModel(
-            WHISPER_MODEL,
-            device=device,
-            compute_type=compute_type,
-        )
-    except RuntimeError as e:
-        if "out of memory" in str(e).lower() and device == "cuda":
-            logger.warning(
-                "GPU OOM with %s on %s, falling back to CPU int8", WHISPER_MODEL, compute_type
-            )
-            device, compute_type, cc = "cpu", "int8", 0
-            _device_info = {"device": device, "compute_type": compute_type, "compute_capability": cc}
-            _model = WhisperModel(
-                WHISPER_MODEL,
-                device=device,
-                compute_type=compute_type,
-            )
-        else:
-            raise
+    _model = WhisperModel(
+        WHISPER_MODEL,
+        device=device,
+        compute_type=compute_type,
+    )
 
-    if device == "cuda":
-        batch_size = 16
-    else:
-        batch_size = 1
-
-    _batched = BatchedInferencePipeline(model=_model)
-    logger.info("Model %s loaded on %s/%s (batch_size=%d).", WHISPER_MODEL, device, compute_type, batch_size)
+    logger.info("Model %s loaded on %s/%s.", WHISPER_MODEL, device, compute_type)
 
 
 async def transcribe_audio(
@@ -136,26 +108,34 @@ async def transcribe_audio(
     language: str = None,
     job_id: str = "unknown",
 ) -> dict:
-    device = _device_info.get("device", "cpu")
-    batch_size = 16 if device == "cuda" else 1
-
     start = time.monotonic()
-    segments, info = await asyncio.to_thread(
-        _batched.transcribe,
-        audio_path,
-        language=language or "en",
-        batch_size=batch_size,
-        vad_filter=True,
-        vad_parameters=dict(
-            min_silence_duration_ms=500,
-            speech_pad_ms=200,
-        ),
-        word_timestamps=False,
-        condition_on_previous_text=True,
-    )
+
+    if _use_batched:
+        from faster_whisper import BatchedInferencePipeline
+        batched = BatchedInferencePipeline(model=_model)
+        segments, info = await asyncio.to_thread(
+            batched.transcribe,
+            audio_path,
+            language=language or "en",
+            batch_size=16,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
+            word_timestamps=False,
+            condition_on_previous_text=True,
+        )
+    else:
+        segments, info = await asyncio.to_thread(
+            _model.transcribe,
+            audio_path,
+            language=language or "en",
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=200),
+            word_timestamps=False,
+            condition_on_previous_text=True,
+        )
     elapsed = time.monotonic() - start
 
-    logger.info("Transcription done in %.2fs device=%s", elapsed, device)
+    logger.info("Transcription done in %.2fs device=%s", elapsed, _device_info.get("device"))
 
     result = {"id": job_id, "segments": []}
     result["language"] = info.language
