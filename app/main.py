@@ -39,6 +39,9 @@ CHUNK_MAX_SIZE = 50 * 1024 * 1024  # 50 MB
 # Files under this size keep using the original single-request path.
 DIRECT_UPLOAD_THRESHOLD = 50 * 1024 * 1024  # 50 MB
 
+# In-memory locks to prevent concurrent finish calls for the same upload.
+_finish_locks: set[str] = set()
+
 
 async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1800):
     logger.info("Starting periodic cleanup task (interval=%ds, max_age=%ds)", interval_seconds, max_age_seconds)
@@ -146,6 +149,16 @@ async def list_models():
         "device": _device_info.get("device", "unknown"),
         "compute_type": _device_info.get("compute_type", "unknown"),
         "available": SUPPORTED_MODELS,
+    }
+
+
+@app.get("/api/upload/config")
+async def upload_config():
+    return {
+        "chunk_size": CHUNK_MAX_SIZE,
+        "max_file_size": MAX_FILE_SIZE,
+        "direct_upload_threshold": DIRECT_UPLOAD_THRESHOLD,
+        "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
     }
 
 
@@ -257,6 +270,9 @@ async def upload_finish(
     upload_id: str,
     language: str = Form(default=""),
 ):
+    if upload_id in _finish_locks:
+        raise HTTPException(409, "Upload is already being finalized")
+
     upload_dir = CHUNK_DIR / upload_id
     if not upload_dir.exists():
         raise HTTPException(404, "Upload session not found")
@@ -272,8 +288,18 @@ async def upload_finish(
 
     missing = [i for i in range(meta["total_chunks"]) if i not in meta["received"]]
     if missing:
-        raise HTTPException(400, f"Missing chunks: {missing}")
+        raise HTTPException(
+            400,
+            detail={
+                "message": f"Missing chunks: {missing}",
+                "upload_id": upload_id,
+                "total_chunks": meta["total_chunks"],
+                "received": len(meta["received"]),
+                "missing": missing,
+            },
+        )
 
+    _finish_locks.add(upload_id)
     ext = Path(meta["filename"]).suffix.lower()
     job_id = str(uuid.uuid4())[:8]
     job_dir = get_job_dir(job_id)
@@ -314,6 +340,7 @@ async def upload_finish(
         raise HTTPException(500, f"Transcription failed: {str(e)}")
 
     finally:
+        _finish_locks.discard(upload_id)
         cleanup_job(job_id)
         shutil.rmtree(upload_dir, ignore_errors=True)
 
