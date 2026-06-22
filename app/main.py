@@ -6,12 +6,13 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import shutil
+import threading
 import time
 
 from app.config import (
@@ -48,6 +49,12 @@ DIRECT_UPLOAD_THRESHOLD = 50 * 1024 * 1024  # 50 MB
 
 # In-memory locks to prevent concurrent finish calls for the same upload.
 _finish_locks: set[str] = set()
+
+# In-memory store of running/completed transcription jobs.
+# Format: job_id -> {status, progress, result?, error?, created_at}
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+JOB_MAX_AGE_SECONDS = 30 * 60  # 30 minutes
 
 
 async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1800):
@@ -90,6 +97,21 @@ async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1
                         shutil.rmtree(p, ignore_errors=True)
                 except Exception as p_err:
                     logger.error("Error checking path %s during cleanup: %s", p.name, p_err)
+
+            # Sweep stale job entries from the in-memory job store.
+            try:
+                now_ts = now
+                stale = []
+                with _jobs_lock:
+                    for jid, jstate in list(_jobs.items()):
+                        if now_ts - jstate.get("created_at", 0) > JOB_MAX_AGE_SECONDS:
+                            stale.append(jid)
+                    for jid in stale:
+                        _jobs.pop(jid, None)
+                if stale:
+                    logger.info("Removed %d expired transcription jobs from store", len(stale))
+            except Exception as jc_err:
+                logger.error("Error cleaning up job store: %s", jc_err)
 
         except asyncio.CancelledError:
             logger.info("Periodic cleanup task cancelled")
@@ -313,14 +335,14 @@ async def upload_chunk(
 @app.post("/api/upload/finish/{upload_id}")
 async def upload_finish(
     upload_id: str,
-    language: str = Form(default=""),
+    language: str = Query(default=""),
 ):
     if upload_id in _finish_locks:
         raise HTTPException(409, "Upload is already being finalized")
 
     _finish_locks.add(upload_id)
-    job_id = None
     upload_dir = CHUNK_DIR / upload_id
+    job_id: str | None = None
     success = False
 
     try:
@@ -389,32 +411,95 @@ async def upload_finish(
                 f"got {assembled_size}",
             )
 
+        # Chunks are valid and the file is assembled — release the upload session
+        # so the user can't accidentally trigger another transcription of the
+        # same chunks, and so disk is freed.
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        _finish_locks.discard(upload_id)
+
+        # Register the job BEFORE spawning the background task so a fast-polling
+        # client cannot see "not found" between spawn and registration.
+        with _jobs_lock:
+            _jobs[job_id] = {
+                "status": "processing",
+                "progress": 0.0,
+                "created_at": time.time(),
+            }
+
         logger.info(
-            "Transcribing chunked upload file=%s (%d bytes) lang=%s job=%s",
-            meta["filename"], meta["size"], lang, job_id,
+            "Spawned transcription job=%s file=%s (%d bytes) lang=%s",
+            job_id, meta["filename"], meta["size"], lang,
         )
 
-        result = await transcribe_audio(str(file_path), lang, job_id)
-        logger.info(
-            "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
-            job_id, len(result.get("segments", [])),
-            result.get("duration", 0), result.get("process_time", 0),
-        )
+        async def _run_transcription():
+            try:
+                result = await transcribe_audio(str(file_path), lang, job_id)
+                logger.info(
+                    "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
+                    job_id, len(result.get("segments", [])),
+                    result.get("duration", 0), result.get("process_time", 0),
+                )
+                with _jobs_lock:
+                    _jobs[job_id] = {
+                        "status": "completed",
+                        "progress": 1.0,
+                        "result": result,
+                        "created_at": _jobs[job_id]["created_at"],
+                    }
+            except Exception as e:
+                logger.error("Transcription failed job=%s error=%s", job_id, str(e))
+                with _jobs_lock:
+                    _jobs[job_id] = {
+                        "status": "failed",
+                        "error": str(e),
+                        "created_at": _jobs[job_id]["created_at"],
+                    }
+            finally:
+                cleanup_job(job_id)
+
+        asyncio.create_task(_run_transcription())
+
         success = True
-        return JSONResponse(result)
+        return JSONResponse({
+            "job_id": job_id,
+            "status": "processing",
+            "progress": 0.0,
+        })
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Transcription failed job=%s error=%s", job_id or "unknown", str(e))
-        raise HTTPException(500, f"Transcription failed: {str(e)}")
-
+        logger.error("Finish failed upload=%s error=%s", upload_id, str(e))
+        raise HTTPException(500, f"Finish failed: {str(e)}")
     finally:
         _finish_locks.discard(upload_id)
-        if job_id:
-            cleanup_job(job_id)
-        if success:
-            shutil.rmtree(upload_dir, ignore_errors=True)
+        if not success and job_id is None:
+            pass
+
+
+@app.get("/api/transcribe/status/{job_id}")
+async def transcribe_status(job_id: str):
+    """Poll for the status / result of a transcription job spawned by /finish."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found (or expired)")
+
+    elapsed = time.time() - job["created_at"]
+    response = {
+        "job_id": job_id,
+        "status": job["status"],
+        "elapsed_seconds": round(elapsed, 1),
+    }
+    if job["status"] == "processing":
+        # crude progress hint: cap at 0.9 so the UI doesn't look "done" until completed
+        response["progress"] = min(0.9, elapsed / max(1.0, job.get("expected_seconds", 60.0)))
+    elif job["status"] == "completed":
+        response["progress"] = 1.0
+        response["result"] = job["result"]
+    elif job["status"] == "failed":
+        response["error"] = job.get("error", "Unknown error")
+    return JSONResponse(response)
 
 
 @app.post("/api/transcribe")
