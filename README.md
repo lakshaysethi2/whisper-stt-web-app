@@ -157,6 +157,62 @@ Upload an audio or video file for transcription.
 
 List available models and current device info.
 
+### `GET /api/upload/config`
+
+Get chunked upload configuration (chunk size, thresholds, allowed extensions).
+
+**Response:** `application/json`
+```json
+{
+  "chunk_size": 5242880,
+  "max_file_size": 2147483648,
+  "direct_upload_threshold": 52428800,
+  "allowed_extensions": [".mp3", ".wav", ...]
+}
+```
+
+### `POST /api/upload/start`
+
+Start a chunked upload session for files larger than 50 MB.
+
+**Request:** `multipart/form-data`
+- `filename` — Original filename (required)
+- `size` — Total file size in bytes (required)
+- `total_chunks` — Number of chunks (required)
+
+**Response:** `application/json`
+```json
+{
+  "upload_id": "a1b2c3d4"
+}
+```
+
+### `POST /api/upload/chunk/{upload_id}`
+
+Upload a single chunk. Client uploads chunks in parallel batches of 4, with retry logic (3 attempts with exponential backoff).
+
+**Request:** `multipart/form-data`
+- `chunk_index` — Zero-based chunk index (required)
+- `file` — Chunk data (required)
+
+**Response:** `application/json`
+```json
+{
+  "ok": true,
+  "received": 5,
+  "total": 10
+}
+```
+
+### `POST /api/upload/finish/{upload_id}`
+
+Finalize upload and begin transcription. Reassembles chunks and runs Whisper. Only one finish call per upload is allowed (concurrent calls return 409).
+
+**Request:** `multipart/form-data`
+- `language` — Language code (optional, defaults to `en`)
+
+**Response:** Same as `POST /api/transcribe`.
+
 ### `GET /health`
 
 Health check with device information.
