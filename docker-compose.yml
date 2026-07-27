@@ -2,27 +2,27 @@ services:
   whisper-web:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.cpu
     ports:
-      - "8000:8000"
+      - "${HOST_PORT:-8561}:8000"
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
-      - HF_TOKEN=${HF_TOKEN}
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-536870912}
+      - MIN_FREE_DISK_BYTES=${MIN_FREE_DISK_BYTES:-2147483648}
+      - HF_TOKEN=${HF_TOKEN:-}
       - HF_HOME=/cache
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     volumes:
       - hf-cache:/cache
     tmpfs:
       - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
 
 volumes:
   hf-cache:

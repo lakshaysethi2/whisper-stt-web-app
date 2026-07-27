@@ -16,6 +16,7 @@ import time
 
 from app.config import (
     WHISPER_MODEL, WHISPER_LANGUAGE, MAX_FILE_SIZE,
+    MIN_FREE_DISK_BYTES, check_disk_space,
     ALLOWED_EXTENSIONS, SUPPORTED_MODELS, get_job_dir, cleanup_job,
     cleanup_all_jobs, WORK_DIR,
 )
@@ -130,6 +131,22 @@ async def lifespan(app: FastAPI):
         logger.info("Startup cleanup completed successfully.")
     except Exception as e:
         logger.error("Error during startup cleanup: %s", e)
+
+    # Check disk space at startup
+    free_ok = check_disk_space()
+    if not free_ok:
+        logger.warning(
+            "Low disk space at startup: free below MIN_FREE_DISK_BYTES (%d bytes). "
+            "Uploads may be rejected.",
+            MIN_FREE_DISK_BYTES,
+        )
+    else:
+        usage = __import__("shutil").disk_usage(str(WORK_DIR))
+        logger.info(
+            "Disk space OK: %d MB free (threshold %d MB)",
+            usage.free // (1024 * 1024),
+            MIN_FREE_DISK_BYTES // (1024 * 1024),
+        )
 
     # Ensure the chunk directory exists after startup cleanup
     CHUNK_DIR.mkdir(parents=True, exist_ok=True)
@@ -574,6 +591,17 @@ async def transcribe(
     job_id = str(uuid.uuid4())[:8]
     job_dir = get_job_dir(job_id)
     file_path = job_dir / f"input{ext}"
+
+    # Reject early if disk space is critically low
+    if not check_disk_space():
+        # Try cleaning stale jobs first, then recheck
+        cleanup_all_jobs()
+        if not check_disk_space():
+            raise HTTPException(
+                507,
+                f"Server disk space too low. Minimum required: "
+                f"{MIN_FREE_DISK_BYTES // (1024*1024)} MB",
+            )
 
     try:
         # Stream uploaded file to disk in chunks to avoid high RAM usage
