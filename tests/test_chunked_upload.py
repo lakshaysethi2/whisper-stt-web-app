@@ -17,8 +17,35 @@ def _cleanup_upload(upload_id: str):
         shutil.rmtree(d, ignore_errors=True)
 
 
+import asyncio as _asyncio
+
+
+def _run_sync(coro):
+    """Helper: run a coroutine in a fresh event loop (for setup, NOT for mocks)."""
+    loop = _asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _make_async_mock(result_dict):
+    """Return an async side_effect that resolves immediately to result_dict."""
+    async def _mock(*args, **kwargs):
+        return result_dict
+    return _mock
+
+
+def _make_slow_async_mock(result_dict, delay=10):
+    """Return an async side_effect that sleeps then resolves to result_dict."""
+    async def _mock(*args, **kwargs):
+        await _asyncio.sleep(delay)
+        return result_dict
+    return _mock
+
+
 def test_chunked_upload_flow():
-    """Start -> chunks -> finish (mocked transcription)."""
+    """Start -> chunks -> finish (mocked transcription). Verifies async behaviour."""
     upload_id = None
     try:
         payload = b"AA" * 512
@@ -42,22 +69,35 @@ def test_chunked_upload_flow():
         assert body["received"] == 1
         assert body["total"] == total_chunks
 
-        with patch("app.main.transcribe_audio") as mock_transcribe:
-            mock_transcribe.return_value = {
-                "text": "hello world",
-                "language": "en",
-                "duration": 2.0,
-                "process_time": 0.1,
-                "segments": [],
-            }
-            resp = client.post(
-                f"/api/upload/finish/{upload_id}",
-                data={"language": "en"},
-            )
+        mock_result = {
+            "text": "hello world", "language": "en",
+            "duration": 2.0, "process_time": 0.1,
+            "segments": [], "id": "x",
+            "device": "cpu", "compute_type": "int8",
+        }
+
+        with patch("app.main.transcribe_audio",
+                   side_effect=_make_async_mock(mock_result)):
+            resp = client.post(f"/api/upload/finish/{upload_id}", params={"language": "en"}, timeout=2.0)
             assert resp.status_code == 200
             data = resp.json()
-            assert data["text"] == "hello world"
+            assert data["status"] == "processing"
+            job_id = data["job_id"]
 
+            # Poll for completion
+            final = None
+            for _ in range(50):
+                _asyncio.sleep(0.1)
+                r = client.get(f"/api/transcribe/status/{job_id}")
+                if r.status_code == 200 and r.json().get("status") == "completed":
+                    final = r.json()
+                    break
+            assert final is not None
+            assert final["result"]["text"] == "hello world"
+
+            # Cleanup job entry
+            from app.main import _jobs
+            _jobs.pop(job_id, None)
     finally:
         if upload_id:
             _cleanup_upload(upload_id)
@@ -116,7 +156,7 @@ def test_invalid_language_preserves_session():
                     files={"file": (f"test.wav.part{i}", b"X" * 10, "audio/wav")},
                 )
 
-            resp = client.post(f"/api/upload/finish/{upload_id}", data={"language": "!!!"})
+            resp = client.post(f"/api/upload/finish/{upload_id}", params={"language": "!!!"})
             assert resp.status_code == 400
             assert "Invalid language" in resp.json()["detail"]
 
@@ -276,3 +316,142 @@ def test_upload_config():
     assert "direct_upload_threshold" in data
     assert "allowed_extensions" in data
     assert isinstance(data["allowed_extensions"], list)
+
+
+# ---------------------------------------------------------------------------
+# Async transcription (fire-and-poll) tests
+# ---------------------------------------------------------------------------
+
+
+def test_finish_returns_immediately_with_job_id():
+    """/finish should not block on transcription; it must return a job_id fast."""
+    with patch("app.main.CHUNK_SIZE", 10), patch("app.main.MAX_CHUNKS", 100):
+        from app.main import _jobs
+        upload_id = None
+        try:
+            resp = client.post(
+                "/api/upload/start",
+                data={"filename": "test.wav", "size": 10, "total_chunks": 1},
+            )
+            upload_id = resp.json()["upload_id"]
+            for i in range(1):
+                client.post(
+                    f"/api/upload/chunk/{upload_id}",
+                    data={"chunk_index": i},
+                    files={"file": (f"test.wav.part{i}", b"X" * 10, "audio/wav")},
+                )
+
+            slow_result = {
+                "text": "slow result", "language": "en",
+                "duration": 1.0, "process_time": 10.0,
+                "segments": [], "id": "x",
+                "device": "cpu", "compute_type": "int8",
+            }
+
+            with patch("app.main.transcribe_audio",
+                       side_effect=_make_slow_async_mock(slow_result, delay=10)):
+                resp = client.post(f"/api/upload/finish/{upload_id}", data={}, timeout=2.0)
+                assert resp.status_code == 200, resp.text
+                body = resp.json()
+                assert "job_id" in body
+                assert body["status"] == "processing"
+                job_id = body["job_id"]
+
+                # /finish MUST have removed the upload session (chunks consumed).
+                assert not (CHUNK_DIR / upload_id).exists()
+
+                # Status endpoint should report processing.
+                _asyncio.sleep(0.5)
+                status = None
+                for _ in range(5):
+                    r = client.get(f"/api/transcribe/status/{job_id}")
+                    if r.status_code == 200:
+                        status = r.json()
+                        break
+                assert status is not None
+                assert status["status"] == "processing"
+                assert "elapsed_seconds" in status
+
+                # Cleanup the running background task + job entry for this test.
+                _jobs.pop(job_id, None)
+        finally:
+            if upload_id:
+                _cleanup_upload(upload_id)
+
+
+def test_status_returns_completed_with_result():
+    """/status returns completed+result once transcription finishes."""
+    with patch("app.main.CHUNK_SIZE", 10), patch("app.main.MAX_CHUNKS", 100):
+        from app.main import _jobs
+        upload_id = None
+        try:
+            resp = client.post(
+                "/api/upload/start",
+                data={"filename": "test.wav", "size": 10, "total_chunks": 1},
+            )
+            upload_id = resp.json()["upload_id"]
+            client.post(
+                f"/api/upload/chunk/{upload_id}",
+                data={"chunk_index": 0},
+                files={"file": ("test.wav.part0", b"X" * 10, "audio/wav")},
+            )
+
+            fast_result = {
+                "text": "fast result", "language": "en",
+                "duration": 0.5, "process_time": 0.05,
+                "segments": [], "id": "x",
+                "device": "cpu", "compute_type": "int8",
+            }
+
+            with patch("app.main.transcribe_audio",
+                       side_effect=_make_async_mock(fast_result)):
+                resp = client.post(f"/api/upload/finish/{upload_id}", data={}, timeout=2.0)
+                assert resp.status_code == 200
+                job_id = resp.json()["job_id"]
+
+                # Poll up to 5s for completion.
+                status = None
+                for _ in range(50):
+                    _asyncio.sleep(0.1)
+                    r = client.get(f"/api/transcribe/status/{job_id}")
+                    if r.status_code == 200 and r.json().get("status") in ("completed", "failed"):
+                        status = r.json()
+                        break
+
+                assert status is not None, "job never completed"
+                assert status["status"] == "completed"
+                assert status["progress"] == 1.0
+                assert status["result"]["text"] == "fast result"
+        finally:
+            if upload_id:
+                _cleanup_upload(upload_id)
+
+
+def test_status_returns_404_for_unknown_job():
+    resp = client.get("/api/transcribe/status/zzzzzzzz")
+    assert resp.status_code == 404
+
+
+def test_finish_preserves_session_on_missing_chunks():
+    """Sanity: existing behaviour for missing chunks still preserved."""
+    with patch("app.main.CHUNK_SIZE", 10), patch("app.main.MAX_CHUNKS", 100):
+        upload_id = None
+        try:
+            resp = client.post(
+                "/api/upload/start",
+                data={"filename": "test.wav", "size": 30, "total_chunks": 3},
+            )
+            upload_id = resp.json()["upload_id"]
+            for i in [0, 2]:
+                client.post(
+                    f"/api/upload/chunk/{upload_id}",
+                    data={"chunk_index": i},
+                    files={"file": (f"test.wav.part{i}", b"X" * 10, "audio/wav")},
+                )
+            resp = client.post(f"/api/upload/finish/{upload_id}", data={})
+            assert resp.status_code == 400
+            assert "Missing chunks" in resp.text or "missing" in resp.text.lower()
+            assert (CHUNK_DIR / upload_id).exists()
+        finally:
+            if upload_id:
+                _cleanup_upload(upload_id)
