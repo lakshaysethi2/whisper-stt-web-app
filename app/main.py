@@ -208,6 +208,29 @@ async def upload_config():
     }
 
 
+def _cleanup_stale_chunks(max_age_seconds: int = 1800):
+    now = time.time()
+    if not CHUNK_DIR.exists():
+        return
+    for cp in list(CHUNK_DIR.iterdir()):
+        try:
+            if not cp.is_dir():
+                continue
+            meta_path = cp / "meta.json"
+            created = cp.stat().st_mtime
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    created = meta.get("created", created)
+                except Exception:
+                    pass
+            if now - created > max_age_seconds:
+                logger.info("Cleaning stale chunk session on start: %s (age: %.1fs)", cp.name, now - created)
+                shutil.rmtree(cp, ignore_errors=True)
+        except Exception:
+            pass
+
+
 @app.post("/api/upload/start")
 async def upload_start(
     filename: str = Form(...),
@@ -246,6 +269,19 @@ async def upload_start(
             400,
             f"Too many chunks: {total_chunks}. Max: {MAX_CHUNKS}",
         )
+
+    _cleanup_stale_chunks()
+
+    stat = shutil.disk_usage(str(CHUNK_DIR))
+    if stat.free < size + 100 * 1024 * 1024:
+        _cleanup_stale_chunks(max_age_seconds=0)
+        stat = shutil.disk_usage(str(CHUNK_DIR))
+        if stat.free < size + 100 * 1024 * 1024:
+            raise HTTPException(
+                507,
+                f"Not enough disk space. Need {size // (1024*1024)} MB, "
+                f"have {stat.free // (1024*1024)} MB free.",
+            )
 
     upload_id = str(uuid.uuid4())[:8]
     upload_dir = CHUNK_DIR / upload_id
@@ -338,6 +374,14 @@ async def upload_chunk(
     except HTTPException:
         tmp_path.unlink(missing_ok=True)
         raise
+    except OSError as e:
+        tmp_path.unlink(missing_ok=True)
+        if e.errno == 28:
+            _cleanup_stale_chunks(max_age_seconds=0)
+            logger.error("No space left, cleaned stale chunks. upload=%s index=%d", upload_id, chunk_index)
+            raise HTTPException(507, "Disk full. Stale uploads have been cleaned — please retry.")
+        logger.error("Chunk upload failed upload=%s index=%d error=%s", upload_id, chunk_index, str(e))
+        raise HTTPException(500, f"Chunk upload failed: {str(e)}")
     except Exception as e:
         tmp_path.unlink(missing_ok=True)
         logger.error("Chunk upload failed upload=%s index=%d error=%s", upload_id, chunk_index, str(e))
