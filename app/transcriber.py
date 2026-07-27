@@ -131,20 +131,33 @@ def load_model():
     logger.info("Model %s loaded on %s/%s (batch_size=%d).", WHISPER_MODEL, device, compute_type, batch_size)
 
 
-async def transcribe_audio(
+# Shared progress dict for real-time transcription progress tracking.
+# Keyed by job_id, value is progress float (0.0 to 1.0) or None when unknown.
+# Written from transcription threads; reads are atomic in CPython.
+_progress: dict[str, float | None] = {}
+
+
+def get_progress(job_id: str) -> float | None:
+    """Thread-safe read of real transcription progress for a job.
+    Returns a float 0.0-1.0, or None if no progress data is available."""
+    return _progress.get(job_id)
+
+
+def _transcribe_sync(
     audio_path: str,
-    language: str = None,
-    job_id: str = "unknown",
+    language: str,
+    job_id: str,
 ) -> dict:
+    """Synchronous transcription function that runs entirely in a thread.
+    Consumes the segment generator inside the thread so the asyncio event loop
+    is never blocked. Updates real progress in _progress dict during iteration."""
     device = _device_info.get("device", "cpu")
-    batch_size = 16 if device == "cuda" else 1
 
     start = time.monotonic()
-    segments, info = await asyncio.to_thread(
-        _batched.transcribe,
+    segments, info = _batched.transcribe(
         audio_path,
         language=language or "en",
-        batch_size=batch_size,
+        batch_size=16 if device == "cuda" else 1,
         vad_filter=True,
         vad_parameters=dict(
             min_silence_duration_ms=500,
@@ -162,22 +175,33 @@ async def transcribe_audio(
     result["device"] = _device_info.get("device", "unknown")
     result["compute_type"] = _device_info.get("compute_type", "unknown")
 
+    audio_duration = info.duration  # total audio duration in seconds
     full_text_parts = []
     total_duration = 0.0
+    max_end = 0.0
 
     for seg in segments:
         text = seg.text.strip()
         if not text:
+            # Still track position even for empty segments
+            max_end = max(max_end, seg.end)
+            if audio_duration and audio_duration > 0:
+                _progress[job_id] = min(1.0, max_end / audio_duration)
             continue
         full_text_parts.append(text)
         duration = seg.end - seg.start
         total_duration += duration
+        max_end = max(max_end, seg.end)
 
         result["segments"].append({
             "text": text,
             "t0": int(seg.start * 1000),
             "t1": int(seg.end * 1000),
         })
+
+        # Update real progress based on audio position
+        if audio_duration and audio_duration > 0:
+            _progress[job_id] = min(1.0, max_end / audio_duration)
 
     result["text"] = " ".join(full_text_parts)
     result["duration"] = total_duration
@@ -187,3 +211,24 @@ async def transcribe_audio(
         result["realtime_factor"] = round(total_duration / elapsed, 1)
 
     return result
+
+
+async def transcribe_audio(
+    audio_path: str,
+    language: str = None,
+    job_id: str = "unknown",
+) -> dict:
+    """Transcribe audio in a thread. Never blocks the asyncio event loop.
+    Returns the result dict once both inference and segment iteration complete."""
+    _progress[job_id] = 0.0
+    try:
+        result = await asyncio.to_thread(
+            _transcribe_sync,
+            audio_path,
+            language or "en",
+            job_id,
+        )
+        _progress[job_id] = 1.0
+        return result
+    finally:
+        _progress.pop(job_id, None)

@@ -29,6 +29,15 @@
     copyBtn: $("#copy-btn"),
     downloadBtn: $("#download-btn"),
     modelBadge: $("#model-badge"),
+    saveLink: $("#save-link"),
+    saveLinkUrl: $("#save-link-url"),
+    saveLinkCopy: $("#save-link-copy"),
+    saveLinkClose: $("#save-link-close"),
+    resumeView: $("#resume-view"),
+    resumeStatus: $("#resume-status"),
+    resumeTitle: $("#resume-title"),
+    resumeError: $("#resume-error"),
+    resumeHomeBtn: $("#resume-home-btn"),
   };
 
   const uploadConfig = {
@@ -36,7 +45,27 @@
     directUploadThreshold: 50 * 1024 * 1024,
   };
 
+  let pollTimer = null;
+  let currentJobId = null;
+
   init();
+
+  // --- URL helpers ---
+
+  function getJobIdFromPath() {
+    const m = window.location.pathname.match(/^\/j\/([a-f0-9]{32})$/);
+    return m ? m[1] : null;
+  }
+
+  function setJobUrl(jobId) {
+    const url = window.location.origin + "/j/" + jobId;
+    window.history.replaceState({ jobId }, "", url);
+    return url;
+  }
+
+  function absoluteJobUrl(jobId) {
+    return window.location.origin + "/j/" + jobId;
+  }
 
   async function init() {
     if ("serviceWorker" in navigator) {
@@ -61,9 +90,190 @@
       }
     } catch {}
 
-    setupRecording();
-    setupFileUpload();
-    setupActions();
+    // Check if we loaded into a job page
+    const jobId = getJobIdFromPath();
+    if (jobId) {
+      await resumeJob(jobId);
+    } else {
+      setupRecording();
+      setupFileUpload();
+      setupActions();
+      showMainUI();
+    }
+  }
+
+  // --- Resume job from URL ---
+
+  async function resumeJob(jobId) {
+    hideMainUI();
+    showResumeLoading();
+
+    let status;
+    try {
+      const r = await fetch(`/api/transcribe/status/${jobId}`);
+      if (!r.ok) {
+        if (r.status === 404) {
+          showResumeExpired(jobId);
+          return;
+        }
+        showResumeError("Server error: " + r.statusText);
+        return;
+      }
+      status = await r.json();
+    } catch (err) {
+      showResumeError("Network error: " + err.message);
+      return;
+    }
+
+    if (status.status === "completed") {
+      showResumeResult(status.result, jobId);
+    } else if (status.status === "failed") {
+      showResumeError(status.error || "Transcription failed");
+    } else {
+      // processing / pending — show progress and start polling
+      showResumeProgress(status, jobId);
+      startResumePolling(jobId);
+    }
+  }
+
+  function startResumePolling(jobId) {
+    if (pollTimer) clearInterval(pollTimer);
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_TIMEOUT_MS = 3 * 3600 * 1000; // 3 hours (backend retention default is 2h, generous margin)
+    const pollStart = Date.now();
+
+    pollTimer = setInterval(async () => {
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        clearInterval(pollTimer);
+        showResumeError("Job timed out — it may have been removed from the server.");
+        return;
+      }
+      try {
+        const r = await fetch(`/api/transcribe/status/${jobId}`);
+        if (!r.ok) {
+          if (r.status === 404) {
+            clearInterval(pollTimer);
+            showResumeExpired(jobId);
+            return;
+          }
+          return; // retry on next tick
+        }
+        const status = await r.json();
+        if (status.status === "completed") {
+          clearInterval(pollTimer);
+          showResumeResult(status.result, jobId);
+        } else if (status.status === "failed") {
+          clearInterval(pollTimer);
+          showResumeError(status.error || "Transcription failed");
+        } else {
+          showResumeProgress(status, jobId);
+        }
+      } catch {
+        // network blip — retry
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
+  // --- UI visibility helpers ---
+
+  function showMainUI() {
+    els.resumeView.classList.add("hidden");
+    document.querySelectorAll(".card:not(#resume-view)").forEach((el) => el.classList.remove("hidden"));
+  }
+
+  function hideMainUI() {
+    document.querySelectorAll(".card:not(#resume-view)").forEach((el) => el.classList.add("hidden"));
+    els.resumeView.classList.remove("hidden");
+    els.status.classList.add("hidden");
+    els.result.classList.add("hidden");
+    els.saveLink.classList.add("hidden");
+  }
+
+  function showResumeLoading() {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Resuming transcription job...";
+    els.resumeStatus.classList.remove("hidden");
+    els.resumeStatus.innerHTML = '<div class="spinner"></div><span>Fetching job status...</span>';
+    els.resumeError.classList.add("hidden");
+    els.resumeHomeBtn.classList.add("hidden");
+  }
+
+  function showResumeProgress(status, jobId) {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Transcription in progress";
+    els.resumeStatus.classList.remove("hidden");
+    const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
+    let progressMsg;
+    if (status.progress_note === "working") {
+      progressMsg = `Transcribing... ${elapsed}s elapsed (working, progress unknown)`;
+    } else {
+      const pct = Math.round((status.progress || 0) * 100);
+      progressMsg = `Transcribing... ${elapsed}s elapsed (${pct}%)`;
+    }
+    els.resumeStatus.innerHTML = `<div class="spinner"></div><span>${escapeHtml(progressMsg)}</span>`;
+    els.resumeError.classList.add("hidden");
+    els.resumeHomeBtn.classList.add("hidden");
+  }
+
+  function showResumeResult(result, jobId) {
+    els.resumeView.classList.add("hidden");
+    showMainUI();
+    showResult(result);
+    // Add the save link with the completed job URL
+    showSaveLink(jobId);
+  }
+
+  function showResumeError(msg) {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Transcription failed";
+    els.resumeStatus.classList.add("hidden");
+    els.resumeError.classList.remove("hidden");
+    els.resumeError.textContent = msg;
+    els.resumeHomeBtn.classList.remove("hidden");
+    els.resumeHomeBtn.addEventListener("click", () => {
+      window.location.href = "/";
+    });
+  }
+
+  function showResumeExpired(jobId) {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Job not found";
+    els.resumeStatus.classList.add("hidden");
+    els.resumeError.classList.remove("hidden");
+    els.resumeError.textContent =
+      "This transcription job has expired or the server has restarted. " +
+      "Jobs are kept for a limited time. Please start a new transcription.";
+    els.resumeHomeBtn.classList.remove("hidden");
+    els.resumeHomeBtn.addEventListener("click", () => {
+      window.location.href = "/";
+    });
+  }
+
+  // --- Save link UI ---
+
+  function showSaveLink(jobId) {
+    const url = absoluteJobUrl(jobId);
+    els.saveLinkUrl.textContent = url;
+    els.saveLinkUrl.href = url;
+    els.saveLink.classList.remove("hidden");
+
+    // Copy button
+    els.saveLinkCopy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        els.saveLinkCopy.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Copied`;
+        setTimeout(() => {
+          els.saveLinkCopy.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg> Copy link`;
+        }, 2000);
+      } catch {
+        showToast("Copy failed");
+      }
+    };
+
+    // Close button
+    els.saveLinkClose.onclick = () => {
+      els.saveLink.classList.add("hidden");
+    };
   }
 
   // --- Recording ---
@@ -237,6 +447,60 @@
     return chunkedUpload(file);
   }
 
+  // Shared polling after job creation (used by both directUpload and chunkedUpload)
+  function pollForJobCompletion(jobId) {
+    currentJobId = jobId;
+    const url = setJobUrl(jobId);
+    showSaveLink(jobId);
+
+    showStatus("Transcribing... This may take several minutes for long files.");
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const pollStart = Date.now();
+
+    function poll() {
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        showToast("Transcription timed out after 30 minutes. Your link is saved — refresh to check later.");
+        resetUploadUI();
+        return;
+      }
+
+      fetch(`/api/transcribe/status/${jobId}`)
+        .then((r) => {
+          if (!r.ok) throw new Error("Status check failed: " + r.statusText);
+          return r.json();
+        })
+        .then((status) => {
+          if (status.status === "completed") {
+            showResult(status.result);
+            showSaveLink(jobId);
+            resetUploadUI();
+          } else if (status.status === "failed") {
+            showToast(`Transcription failed: ${status.error || "unknown error"}`);
+            resetUploadUI();
+          } else {
+            // processing — update progress
+            const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
+            let progressMsg;
+            if (status.progress_note === "working") {
+              progressMsg = `Transcribing... ${elapsed}s elapsed (working, progress unknown)`;
+            } else {
+              const pct = Math.round((status.progress || 0) * 100);
+              progressMsg = `Transcribing... ${elapsed}s elapsed (${pct}%)`;
+            }
+            showStatus(progressMsg);
+            setTimeout(poll, POLL_INTERVAL_MS);
+          }
+        })
+        .catch((err) => {
+          console.warn("status poll error:", err);
+          setTimeout(poll, POLL_INTERVAL_MS); // retry on network blip
+        });
+    }
+
+    setTimeout(poll, POLL_INTERVAL_MS);
+  }
+
   function directUpload(file) {
     const form = new FormData();
     form.append("file", file);
@@ -281,20 +545,28 @@
       };
 
       xhr.upload.onloadend = () => {
-        showStatus("Transcribing... This may take a moment.");
+        // Server now returns {job_id, status, progress} instead of full result.
+        // We'll start polling in the .then() handler.
       };
 
       xhr.open("POST", "/api/transcribe");
       xhr.send(form);
     })
     .then((data) => {
-      showResult(data);
+      if (data.job_id) {
+        pollForJobCompletion(data.job_id);
+      } else if (data.text !== undefined) {
+        // Legacy response (should not happen with new server, but handle gracefully)
+        showResult(data);
+        resetUploadUI();
+      } else {
+        showToast("Unexpected server response");
+        resetUploadUI();
+      }
     })
     .catch((err) => {
       showToast(err.message);
       hideStatus();
-    })
-    .finally(() => {
       resetUploadUI();
     });
   }
@@ -395,46 +667,8 @@
       return;
     }
 
-    // Poll for completion
-    showStatus("Transcribing... This may take several minutes for long files.");
-    const POLL_INTERVAL_MS = 2000;
-    const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-    const pollStart = Date.now();
-
-    while (true) {
-      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
-        showToast("Transcription timed out after 30 minutes. The server may still finish — refresh and try again later.");
-        resetUploadUI();
-        return;
-      }
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-      let status;
-      try {
-        const r = await fetch(`/api/transcribe/status/${jobId}`);
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          throw new Error(errorMessage(err, `Status check failed: ${r.statusText}`));
-        }
-        status = await r.json();
-      } catch (err) {
-        // network blip — keep polling up to POLL_TIMEOUT_MS
-        console.warn("status poll error:", err);
-        continue;
-      }
-      if (status.status === "completed") {
-        showResult(status.result);
-        break;
-      }
-      if (status.status === "failed") {
-        showToast(`Transcription failed: ${status.error || "unknown error"}`);
-        break;
-      }
-      // status === "processing" — update UI
-      const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
-      const pct = Math.round((status.progress || 0) * 100);
-      showStatus(`Transcribing... ${elapsed}s elapsed (${pct}%)`);
-    }
-
+    // Start polling with bookmarkable link
+    pollForJobCompletion(jobId);
     resetUploadUI();
   }
 

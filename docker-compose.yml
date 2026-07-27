@@ -9,6 +9,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+      - JOB_RETENTION_SECONDS=${JOB_RETENTION_SECONDS:-7200}
       - HF_TOKEN=${HF_TOKEN}
       - HF_HOME=/cache
     deploy:

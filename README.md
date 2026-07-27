@@ -90,9 +90,10 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_MODEL` | `base` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo) |
+| `WHISPER_MODEL` | `large-v3-turbo` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo) |
 | `WHISPER_LANGUAGE` | `en` | Language for transcription |
-| `MAX_FILE_SIZE` | `262144000` | Max upload size (250 MB) |
+| `MAX_FILE_SIZE` | `2147483648` | Max upload size (2 GB) |
+| `JOB_RETENTION_SECONDS` | `7200` | How long completed/failed jobs are kept for resume (seconds). Running jobs are never cleaned up. |
 
 ### Model Recommendations by VRAM
 
@@ -246,7 +247,14 @@ When `status` is `"completed"`, a `result` field is included with the full trans
 (text, segments, language, duration, etc.). When `status` is `"failed"`, an `error` field
 is included.
 
-Jobs expire from the in-memory store 30 minutes after creation.
+Jobs are kept for `JOB_RETENTION_SECONDS` (default 2 hours). Running jobs are never cleaned up.
+Job status is persisted to disk under `WORK_DIR/<job_id>/status.json` so that completed/failed
+results survive container restart (best-effort).
+
+### `GET /j/{job_id}`
+
+SPA route for bookmarkable job pages. Serves the same `index.html` as `/`; the frontend
+detect the job id from the URL path and resumes polling / displays results automatically.
 
 ### `GET /health`
 
