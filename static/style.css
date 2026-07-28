@@ -103,6 +103,22 @@ header h1 {
   letter-spacing: -0.02em;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-new-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.header-new-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
 .model-badge {
   font-size: 0.7rem;
   font-weight: 600;
@@ -601,6 +617,45 @@ select:focus {
 
 .resume-home-btn {
   margin-top: 4px;
+}
+
+/* Model choice error state */
+.model-error {
+  font-size: 0.82rem;
+  color: var(--danger);
+  margin-top: 6px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  background: var(--danger-glow);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: var(--radius-sm);
+  animation: shake 0.3s ease;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+
+select.input-error {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-glow);
+}
+
+.required-star {
+  color: var(--danger);
+  font-size: 0.9rem;
+}
+
+/* Result "Start new transcription" button */
+.result-new-btn {
+  white-space: nowrap;
+}
+
+.result-new-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* Model choice hint */

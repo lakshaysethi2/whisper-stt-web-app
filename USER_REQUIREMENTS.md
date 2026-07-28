@@ -123,3 +123,29 @@ Previously the UI silently used the server's WHISPER_MODEL default. Users had no
    - https://huggingface.co/spaces/Xenova/whisper-webgpu
 2. Short note: runs on their device; not this server; large files may struggle on phones.
 3. Do not embed Transformers.js / in-app client Whisper.
+
+## Always-visible Start New Transcription
+
+### Problem
+After viewing a resume link (`/j/{id}`), users could not find a way to start a new transcription.
+
+The model selector was buried below the upload card, making it easy to miss.
+
+### Requirements
+1. **Header button** — A "New transcription" button always visible in the sticky header on all pages.
+2. **Resume view** — "Start new transcription" button always visible in the resume view for all states: loading, progress (polling), error, expired.
+3. **Completed result** — When viewing a completed result from a resume link, show a prominent "Start new transcription" button in the result toolbar.
+4. **Clean slate** — Clicking "Start new transcription" navigates to `/` via `window.location.href = "/"` to give a fresh main UI.
+5. **No cancel** — During in-progress resume polling, the button lets the user start a new transcription without cancelling the server job.
+
+## Model Choice Unmissable
+
+### Problem
+The model selector was placed after the upload card, so users could proceed to upload/transcribe without noticing it.
+
+### Requirements
+1. **Reorder** — Model card must appear BEFORE the upload card in the DOM so the user sees model choice first.
+2. **Inline error** — If user hits Transcribe without a model, show an inline error message directly on the model control (red border + error text).
+3. **No toast-only** — Previously used only a toast for model validation error; now also uses inline error on the model select.
+4. **Error clears** — Inline error disappears when the user changes the model selection.
+5. **Required indicator** — Show a `*` next to the Model card label to indicate it is required.

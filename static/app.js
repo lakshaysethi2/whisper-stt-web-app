@@ -40,6 +40,9 @@
     resumeTitle: $("#resume-title"),
     resumeError: $("#resume-error"),
     resumeHomeBtn: $("#resume-home-btn"),
+    headerNewBtn: $("#header-new-btn"),
+    resultNewBtn: $("#result-new-btn"),
+    modelError: $("#model-error"),
   };
 
   const uploadConfig = {
@@ -200,7 +203,7 @@
     els.resumeStatus.classList.remove("hidden");
     els.resumeStatus.innerHTML = '<div class="spinner"></div><span>Fetching job status...</span>';
     els.resumeError.classList.add("hidden");
-    els.resumeHomeBtn.classList.add("hidden");
+    els.resumeHomeBtn.classList.remove("hidden");
   }
 
   function showResumeProgress(status, jobId) {
@@ -217,7 +220,7 @@
     }
     els.resumeStatus.innerHTML = `<div class="spinner"></div><span>${escapeHtml(progressMsg)}</span>`;
     els.resumeError.classList.add("hidden");
-    els.resumeHomeBtn.classList.add("hidden");
+    els.resumeHomeBtn.classList.remove("hidden");
   }
 
   function showResumeResult(result, jobId) {
@@ -226,6 +229,10 @@
     showResult(result);
     // Add the save link with the completed job URL
     showSaveLink(jobId);
+    // Show "Start new transcription" button in the result toolbar
+    if (els.resultNewBtn) {
+      els.resultNewBtn.classList.remove("hidden");
+    }
   }
 
   function showResumeError(msg) {
@@ -235,9 +242,6 @@
     els.resumeError.classList.remove("hidden");
     els.resumeError.textContent = msg;
     els.resumeHomeBtn.classList.remove("hidden");
-    els.resumeHomeBtn.addEventListener("click", () => {
-      window.location.href = "/";
-    });
   }
 
   function showResumeExpired(jobId) {
@@ -249,9 +253,6 @@
       "This transcription job has expired or the server has restarted. " +
       "Jobs are kept for a limited time. Please start a new transcription.";
     els.resumeHomeBtn.classList.remove("hidden");
-    els.resumeHomeBtn.addEventListener("click", () => {
-      window.location.href = "/";
-    });
   }
 
   // --- Save link UI ---
@@ -446,10 +447,27 @@
     return els.modelSelect ? els.modelSelect.value : "";
   }
 
+  function clearModelError() {
+    if (els.modelError) {
+      els.modelError.classList.add("hidden");
+    }
+    if (els.modelSelect) {
+      els.modelSelect.classList.remove("input-error");
+    }
+  }
+
   function validateModelChosen() {
+    clearModelError();
     const model = getSelectedModel();
     if (!model) {
-      showToast("Please choose a model before transcribing.");
+      if (els.modelError) {
+        els.modelError.classList.remove("hidden");
+      }
+      if (els.modelSelect) {
+        els.modelSelect.classList.add("input-error");
+        els.modelSelect.focus();
+        els.modelSelect.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
       return false;
     }
     return true;
@@ -729,12 +747,42 @@
       els.segmentsWrapper.classList.add("hidden");
     }
 
+    // Hide the "Start new transcription" button by default;
+    // showResumeResult will re-enable it for resume flows.
+    if (els.resultNewBtn) {
+      els.resultNewBtn.classList.add("hidden");
+    }
+
     els.result.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  // --- Start new transcription (navigate to / with clean slate) ---
+
+  function startNewTranscription() {
+    clearModelError();
+    if (pollTimer) clearInterval(pollTimer);
+    window.location.href = "/";
   }
 
   // --- Actions ---
 
   function setupActions() {
+    // Model select: clear inline error on change
+    if (els.modelSelect) {
+      els.modelSelect.addEventListener("change", clearModelError);
+    }
+
+    // "Start new transcription" buttons
+    if (els.headerNewBtn) {
+      els.headerNewBtn.addEventListener("click", startNewTranscription);
+    }
+    if (els.resumeHomeBtn) {
+      els.resumeHomeBtn.addEventListener("click", startNewTranscription);
+    }
+    if (els.resultNewBtn) {
+      els.resultNewBtn.addEventListener("click", startNewTranscription);
+    }
+
     els.copyBtn.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(els.resultText.textContent);

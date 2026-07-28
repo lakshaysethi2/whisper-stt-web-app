@@ -18,11 +18,22 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 ## Tests
 
-- Run via `python -m pytest tests/ -v`
+- Run via `python -m pytest tests/ -v` (uses uv venv at `.venv/`)
 - Key test files: `tests/test_chunked_upload.py`
 - Tests mock `app.main.transcribe_audio` using `_make_async_mock` helper for fast/slow results
 - SPA route tests: `test_spa_job_route_serves_html`, `test_spa_job_route_any_job_id`
 - UUID entropy test: `test_job_id_has_full_uuid_entropy` (asserts 32-char hex)
+- Model required tests: `test_transcribe_missing_model_rejected`, `test_transcribe_empty_model_rejected`, `test_transcribe_invalid_model_rejected`, `test_chunked_upload_missing_model_rejected`
+
+## UI structure
+
+- Cards are in a `<main>` column laid out top-to-bottom.
+- Record card comes first, then Model card (required), then Language, then Upload with Transcribe button.
+- Model card has inline error via `<p class="model-error">` and error styling via `.input-error` on the `<select>`.
+- Header has a "New transcription" button (`#header-new-btn`) always visible, navigating to `/`.
+- Resume states all show a "Start new transcription" button (`#resume-home-btn`).
+- Completed resume results show a "Start new transcription" button in the result toolbar (`#result-new-btn`).
+- Model errors are shown inline (red border + error text) instead of only toast.
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
