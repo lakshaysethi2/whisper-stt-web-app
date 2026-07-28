@@ -105,9 +105,9 @@
     } else {
       setupRecording();
       setupFileUpload();
-      setupActions();
       showMainUI();
     }
+    setupActions();
   }
 
   // --- Resume job from URL ---
@@ -370,12 +370,24 @@
     resetRecordingUI();
   }
 
+  function updateRecordBtnState() {
+    const modelSelected = els.modelSelect && els.modelSelect.value !== "";
+    if (modelSelected) {
+      els.recordBtn.disabled = false;
+      els.recordHint.textContent = "Tap to start recording";
+    } else {
+      els.recordBtn.disabled = true;
+      els.recordHint.textContent = "Select a model to start recording";
+    }
+  }
+
   function resetRecordingUI() {
     els.recordBtn.classList.remove("recording");
     clearInterval(timerInterval);
     els.timer.classList.add("hidden");
     els.timer.textContent = "00:00.0";
-    els.recordHint.textContent = "Tap to start recording";
+    els.recordBtn.disabled = !(els.modelSelect && els.modelSelect.value !== "");
+    els.recordHint.textContent = els.recordBtn.disabled ? "Select a model to start recording" : "Tap to start recording";
   }
 
   function updateTimer() {
@@ -475,7 +487,6 @@
 
   function uploadFile(file) {
     if (!validateModelChosen()) {
-      resetUploadUI();
       return;
     }
     els.transcribeFileBtn.disabled = true;
@@ -719,7 +730,7 @@
 
   function resetUploadUI() {
     els.transcribeFileBtn.disabled = false;
-    els.recordBtn.disabled = false;
+    els.recordBtn.disabled = !(els.modelSelect && els.modelSelect.value !== "");
     resetFileInput();
     hideStatus();
   }
@@ -767,9 +778,14 @@
   // --- Actions ---
 
   function setupActions() {
-    // Model select: clear inline error on change
+    // Model select: clear inline error on change; control record button state
     if (els.modelSelect) {
-      els.modelSelect.addEventListener("change", clearModelError);
+      els.modelSelect.addEventListener("change", function () {
+        clearModelError();
+        updateRecordBtnState();
+      });
+      // Set initial record button state
+      updateRecordBtnState();
     }
 
     // "Start new transcription" buttons

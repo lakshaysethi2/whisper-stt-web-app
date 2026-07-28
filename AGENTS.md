@@ -25,6 +25,19 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - UUID entropy test: `test_job_id_has_full_uuid_entropy` (asserts 32-char hex)
 - Model required tests: `test_transcribe_missing_model_rejected`, `test_transcribe_empty_model_rejected`, `test_transcribe_invalid_model_rejected`, `test_chunked_upload_missing_model_rejected`
 
+## Cypress E2E tests
+
+- Run Cypress headless: `npx cypress run` (requires running server)
+- Run Cypress UI: `npx cypress open`
+- Cypress config: `cypress.config.js` — `baseUrl` from `CYPRESS_BASE_URL` env (default `http://localhost:8000`)
+- Test specs in `cypress/e2e/` (plain JS):
+  1. `home-button.cy.js` — verifies `#header-new-btn` on homepage
+  2. `resume-button.cy.js` — verifies header button + resume home button on `/j/{id}`
+  3. `model-guard.cy.js` — verifies record button disabled until model selected
+  4. `file-keep.cy.js` — verifies file name kept on model validation error
+  5. `result-button.cy.js` — verifies header button visible when result is shown
+- Artifacts (screenshots, videos, downloads) are gitignored
+
 ## UI structure
 
 - Cards are in a `<main>` column laid out top-to-bottom.
