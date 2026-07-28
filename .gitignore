@@ -10,3 +10,4 @@ node_modules/
 !test_audio/*_transcript.txt
 !test_audio/SOURCES.md
 docker-compose.override.yml
+.testvenv/

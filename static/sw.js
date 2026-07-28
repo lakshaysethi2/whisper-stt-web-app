@@ -18,7 +18,9 @@ self.addEventListener("activate", (e) => {
 });
 
 self.addEventListener("fetch", (e) => {
-  if (e.request.url.includes("/api/")) return;
+  const url = new URL(e.request.url);
+  // Never cache API calls or job pages (they are dynamic).
+  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/j/")) return;
   e.respondWith(
     caches.match(e.request).then((r) => r || fetch(e.request))
   );

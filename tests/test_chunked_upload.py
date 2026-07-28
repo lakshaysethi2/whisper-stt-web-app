@@ -455,3 +455,107 @@ def test_finish_preserves_session_on_missing_chunks():
         finally:
             if upload_id:
                 _cleanup_upload(upload_id)
+
+
+# ---------------------------------------------------------------------------
+# Bookmarkable job link tests
+# ---------------------------------------------------------------------------
+
+
+def test_spa_job_route_serves_html():
+    """GET /j/{job_id} serves index.html (the SPA)."""
+    resp = client.get("/j/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    assert b"Whisper STT" in resp.content
+
+
+def test_spa_job_route_any_job_id():
+    """SPA route should accept any 32-char hex job_id."""
+    resp = client.get("/j/0123456789abcdef0123456789abcdef")
+    assert resp.status_code == 200
+    assert b"Whisper STT" in resp.content
+
+
+def test_direct_upload_returns_job_id():
+    """POST /api/transcribe returns {job_id, status, progress} immediately."""
+    from app.main import _jobs
+
+    fast_result = {
+        "text": "direct result", "language": "en",
+        "duration": 0.5, "process_time": 0.05,
+        "segments": [], "id": "x",
+        "device": "cpu", "compute_type": "int8",
+    }
+
+    with patch("app.main.transcribe_audio", side_effect=_make_async_mock(fast_result)):
+        resp = client.post(
+            "/api/transcribe",
+            files={"file": ("test.wav", b"X" * 1024, "audio/wav")},
+            data={"language": "en"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "job_id" in data
+        assert len(data["job_id"]) == 32  # full uuid4 hex = 32 chars
+        assert data["status"] == "processing"
+        assert data["progress"] == 0.0
+
+        job_id = data["job_id"]
+
+        # Poll for completion
+        status = None
+        for _ in range(50):
+            _asyncio.sleep(0.1)
+            r = client.get(f"/api/transcribe/status/{job_id}")
+            if r.status_code == 200 and r.json().get("status") in ("completed", "failed"):
+                status = r.json()
+                break
+
+        assert status is not None, "direct upload job never completed"
+        assert status["status"] == "completed"
+        assert status["result"]["text"] == "direct result"
+
+        _jobs.pop(job_id, None)
+
+
+def test_job_id_has_full_uuid_entropy():
+    """Job IDs must be 128-bit (32 hex chars) to prevent guessing."""
+    from app.main import _jobs
+    with patch("app.main.CHUNK_SIZE", 10), patch("app.main.MAX_CHUNKS", 100):
+        with patch("app.main.transcribe_audio", side_effect=_make_async_mock({
+            "text": "test", "language": "en", "duration": 1.0,
+            "process_time": 0.1, "segments": [], "id": "x",
+            "device": "cpu", "compute_type": "int8",
+        })):
+            upload_id = None
+            try:
+                resp = client.post(
+                    "/api/upload/start",
+                    data={"filename": "test.wav", "size": 10, "total_chunks": 1},
+                )
+                upload_id = resp.json()["upload_id"]
+                client.post(
+                    f"/api/upload/chunk/{upload_id}",
+                    data={"chunk_index": 0},
+                    files={"file": ("test.wav.part0", b"X" * 10, "audio/wav")},
+                )
+                resp = client.post(f"/api/upload/finish/{upload_id}", data={}, timeout=2.0)
+                assert resp.status_code == 200
+                job_id = resp.json()["job_id"]
+                assert len(job_id) == 32, f"Expected 32-char hex UUID, got {len(job_id)}: {job_id}"
+                # Should be valid hex
+                int(job_id, 16)
+                _jobs.pop(job_id, None)
+            finally:
+                if upload_id:
+                    _cleanup_upload(upload_id)
+
+
+def test_status_with_full_uuid_unknown():
+    """Status lookup with a valid-format but unknown job_id returns 404."""
+    resp = client.get("/api/transcribe/status/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    assert resp.status_code == 404
+
+    resp = client.get("/api/transcribe/status/0123456789abcdef0123456789abcdef")
+    assert resp.status_code == 404

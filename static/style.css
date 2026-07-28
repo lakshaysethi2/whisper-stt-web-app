@@ -534,6 +534,75 @@ select:focus {
   display: none !important;
 }
 
+/* Save link card */
+.save-link-card {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary-glow) 50%, var(--bg-card));
+}
+
+.save-link-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.save-link-desc {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.save-link-url-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.save-link-url {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--primary-light);
+  word-break: break-all;
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+}
+
+.save-link-url:hover {
+  text-decoration: underline;
+}
+
+.save-link-copy,
+.save-link-close {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Resume view (job page) */
+.resume-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.resume-view .resume-error {
+  padding: 12px 16px;
+  background: var(--danger-glow);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
+.resume-home-btn {
+  margin-top: 4px;
+}
+
 /* Toast */
 .toast {
   position: fixed;

@@ -176,6 +176,7 @@ clean read speech (1min: 97.58%, 5min: 96.26%).
 - **VAD (Voice Activity Detection):** Skips silence, providing ~2x speedup on real-world audio
 - **Model size vs quality:** `large-v3-turbo` offers best quality; `base` is fastest for quick transcription
 - **CPU int8:** Extremely fast for `base` model (200x+ realtime on modern CPUs)
+- **940MX specific:** Uses `float32` compute type due to lack of FP16 tensor cores. Uses ~338 MiB VRAM for base model.
 
 ## Architecture
 
@@ -264,8 +265,37 @@ poll `GET /api/transcribe/status/{job_id}` for the result.
 
 ### `GET /api/transcribe/status/{job_id}`
 
-Poll the status of a chunked-upload transcription job. Jobs expire from the
-in-memory store 30 minutes after creation.
+Poll the status of a chunked-upload transcription job. `POST /api/upload/finish/{upload_id}`
+returns a `job_id` immediately (well under Cloudflare's 100 s response timeout); poll this
+endpoint every 2 seconds until `status` is `completed` or `failed`.
+
+**Response:** `application/json`
+
+```json
+{
+  "job_id": "abc12345",
+  "status": "processing",
+  "progress": 0.3,
+  "elapsed_seconds": 12.4
+}
+```
+
+When `status` is `"completed"`, a `result` field is included with the full transcription
+(text, segments, language, duration, etc.). When `status` is `"failed"`, an `error` field
+is included.
+
+Jobs are kept for `JOB_RETENTION_SECONDS` (default 2 hours). Running jobs are never cleaned up.
+Job status is persisted to disk under `WORK_DIR/<job_id>/status.json` so that completed/failed
+results survive container restart (best-effort).
+
+### `GET /j/{job_id}`
+
+SPA route for bookmarkable job pages. Serves the same `index.html` as `/`; the frontend
+detect the job id from the URL path and resumes polling / displays results automatically.
+
+### `GET /health`
+
+Health check with device information.
 
 ## License
 

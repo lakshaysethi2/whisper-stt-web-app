@@ -31,6 +31,9 @@ Upload audio files or record from microphone; transcription runs on user's own s
 2. Model overridable via `WHISPER_MODEL` env var.
 3. GPU auto-detection with fallback to CPU int8.
 4. Supported: tiny, base, small, medium, large-v3, large-v3-turbo.
+5. **Mandatory model choice** — User must explicitly choose a model in the UI before transcribing.
+6. **No silent default** — No pre-selected default; server rejects with 400 if model is missing/invalid.
+7. **Model hot-switching** — Changing model sends a request-time param; server loads/caches on demand. WHISPER_MODEL env determines initial preload only.
 
 ### Testing
 
@@ -47,6 +50,7 @@ Upload audio files or record from microphone; transcription runs on user's own s
 4. `GET /api/transcribe/status/{job_id}` — poll async transcription result.
 5. `GET /api/models` — list available models and current device.
 6. `GET /api/upload/config` — client configuration for chunked upload.
+7. `GET /j/{job_id}` — SPA route for bookmarkable job pages.
 
 ### GPU (optional)
 
@@ -54,3 +58,68 @@ Upload audio files or record from microphone; transcription runs on user's own s
 2. Default GPU model: `large-v3-turbo` (better quality on GPU).
 3. CUDA compute capability 5.0+ supported.
 4. Auto-selects float16/float32 based on GPU architecture.
+
+## Bookmarkable Job Resume Links
+
+### Problem
+Transcription of large files takes a long time. Users may close the browser while waiting. They need a unique link they can save and reopen later to see the same job progress/result.
+
+### Requirements
+1. After a transcription job is created (upload finishes, server returns `job_id`):
+   - Browser URL updates to `/j/{job_id}`
+   - A "Save this link" control is displayed (copyable URL button)
+   - Works on mobile and desktop
+
+2. Reopening `/j/{job_id}` (new tab, after close, on phone):
+   - App detects job_id from URL
+   - Fetches status from `/api/transcribe/status/{job_id}`
+   - Shows appropriate UI: progress (processing), result (completed), error (failed), or expired message (not found)
+   - Resumes polling for in-progress jobs
+
+3. Job IDs use full uuid4 hex (128 bits entropy) — not trivially guessable
+
+4. Completed/failed jobs retained for configurable period (`JOB_RETENTION_SECONDS`, default 2 hours)
+   - Running jobs are never cleaned up
+
+5. Job status+result persisted to disk as `status.json` under the job directory
+   - Survives container restart for completed/failed jobs (best-effort)
+   - Running jobs after restart show as expired
+
+6. Both direct upload and chunked upload paths produce bookmarkable job links
+
+## Real Progress Tracking (Bug Fix)
+
+### Problem
+- Progress was fake: `min(0.9, elapsed/60.0)` always shows 90% at 60 seconds regardless of actual transcription progress
+- Segment generator from faster-whisper was iterated on the asyncio event loop, blocking health/status endpoints for multi-hour files
+
+### Fix
+1. Moved entire segment iteration into `to_thread` so event loop is never blocked
+2. Real progress: `seg.end / info.duration` (audio position processed / total audio duration)
+3. When no real progress data yet (model loading / VAD analyzing), show honest "working, progress unknown"
+4. UI shows "working, % unknown" when `progress_note` is "working", else shows real percentage
+
+## Mandatory Model Choice
+
+### Problem
+Previously the UI silently used the server's WHISPER_MODEL default. Users had no idea what model was running or how to switch.
+
+### Requirements
+1. **Mandatory explicit choice** — User must select a model (base or large-v3-turbo) before transcription can start.
+2. **No pre-selected default** — Empty/null until user picks. The select element starts with a placeholder "Choose a model".
+3. **Plain-language tradeoffs** — Each option shows:
+   - **base**: faster, lighter on CPU/RAM, OK for drafts/short audio; lower transcript quality.
+   - **large-v3-turbo**: much better quality; slower and heavier on CPU/RAM; long files take longer.
+4. **Device hint** — Shows runtime device (cpu vs cuda) next to model options.
+5. **Server-side validation** — Transcribe/finish endpoints reject missing/invalid model with 400.
+6. **WHISPER_MODEL env** — May list available models or cold-start preload policy, but must not force a hidden choice that bypasses the UI.
+7. **Model hot-switching** — Preferred: support request-time model param with lazy load/cache. If single-model process, document restart requirement.
+
+## Browser STT Links
+
+### Requirements
+1. Add a UI section "Transcribe in your browser (other sites)" with links to:
+   - https://huggingface.co/spaces/Xenova/whisper-web
+   - https://huggingface.co/spaces/Xenova/whisper-webgpu
+2. Short note: runs on their device; not this server; large files may struggle on phones.
+3. Do not embed Transformers.js / in-app client Whisper.
