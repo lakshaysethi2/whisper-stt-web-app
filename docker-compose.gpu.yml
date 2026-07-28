@@ -1,0 +1,20 @@
+# GPU override for whisper-stt-web-app.
+# Activate with:  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# or set COMPOSE_FILE="docker-compose.yml:docker-compose.gpu.yml"
+#
+# This adds NVIDIA GPU device reservation and sets the model to a larger one
+# suitable for GPU inference.
+services:
+  whisper-web:
+    build:
+      dockerfile: Dockerfile
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

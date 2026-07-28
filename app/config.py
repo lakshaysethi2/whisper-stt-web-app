@@ -2,12 +2,14 @@ import os
 import shutil
 from pathlib import Path
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "2147483648"))  # 2 GB
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "536870912"))   # 512 MB (default; safer for tight-disk VPS)
+MIN_FREE_DISK_BYTES = int(os.getenv("MIN_FREE_DISK_BYTES", "2147483648"))  # 2 GB minimum free space
 
 WORK_DIR = Path(os.getenv("WORK_DIR", "/tmp/whisper-stt"))
 WORK_DIR.mkdir(parents=True, exist_ok=True)
+
 
 ALLOWED_EXTENSIONS = {
     # Audio formats
@@ -39,6 +41,17 @@ def cleanup_job(job_id: str) -> None:
     d = WORK_DIR / job_id
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
+
+
+def check_disk_space(path: str | Path = None) -> bool:
+    """Return True if free disk at path is above MIN_FREE_DISK_BYTES."""
+    target = Path(path or WORK_DIR)
+    try:
+        usage = shutil.disk_usage(str(target))
+        return usage.free >= MIN_FREE_DISK_BYTES
+    except OSError:
+        # If we cannot check, assume safe (transient mount issue, etc.)
+        return True
 
 
 def cleanup_all_jobs() -> None:
