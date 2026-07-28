@@ -29,6 +29,8 @@
     copyBtn: $("#copy-btn"),
     downloadBtn: $("#download-btn"),
     modelBadge: $("#model-badge"),
+    modelSelect: $("#model-select"),
+    deviceHint: $("#device-hint"),
     saveLink: $("#save-link"),
     saveLinkUrl: $("#save-link-url"),
     saveLinkCopy: $("#save-link-copy"),
@@ -80,7 +82,10 @@
 
       if (modelsResult.status === "fulfilled" && modelsResult.value.ok) {
         const modelsData = await modelsResult.value.json();
-        if (els.modelBadge) els.modelBadge.textContent = modelsData.current;
+        if (els.modelBadge) els.modelBadge.textContent = modelsData.current || "?";
+        if (els.deviceHint) {
+          els.deviceHint.textContent = "Server runs on " + (modelsData.device || "?").toUpperCase() + " · " + (modelsData.compute_type || "?");
+        }
       }
 
       if (configResult.status === "fulfilled" && configResult.value.ok) {
@@ -437,7 +442,24 @@
   const MAX_CHUNK_RETRIES = 3;
   const RETRY_BASE_DELAY_MS = 1000;
 
+  function getSelectedModel() {
+    return els.modelSelect ? els.modelSelect.value : "";
+  }
+
+  function validateModelChosen() {
+    const model = getSelectedModel();
+    if (!model) {
+      showToast("Please choose a model before transcribing.");
+      return false;
+    }
+    return true;
+  }
+
   function uploadFile(file) {
+    if (!validateModelChosen()) {
+      resetUploadUI();
+      return;
+    }
     els.transcribeFileBtn.disabled = true;
     els.recordBtn.disabled = true;
 
@@ -505,6 +527,7 @@
     const form = new FormData();
     form.append("file", file);
     if (els.language.value) form.append("language", els.language.value);
+    form.append("model", getSelectedModel());
 
     showStatus("Uploading: 0%...");
 
@@ -648,12 +671,16 @@
     const finishForm = new FormData();
     if (els.language.value) finishForm.append("language", els.language.value);
 
-    const langParam = els.language.value ? `?language=${encodeURIComponent(els.language.value)}` : "";
+    const model = getSelectedModel();
+    const queryParts = [];
+    if (els.language.value) queryParts.push(`language=${encodeURIComponent(els.language.value)}`);
+    if (model) queryParts.push(`model=${encodeURIComponent(model)}`);
+    const queryStr = queryParts.length ? "?" + queryParts.join("&") : "";
 
     let jobId;
     try {
       showStatus("Finalising upload...");
-      const res = await fetch(`/api/upload/finish/${uploadId}${langParam}`, { method: "POST" });
+      const res = await fetch(`/api/upload/finish/${uploadId}${queryStr}`, { method: "POST" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(errorMessage(err, `Finalise failed: ${res.statusText}`));

@@ -4,13 +4,17 @@ import time
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 
-from app.config import WHISPER_MODEL, get_job_dir
+from app.config import WHISPER_MODEL
 
 logger = logging.getLogger(__name__)
 
-_model = None
-_batched = None
+# Multi-model cache: model_name -> (WhisperModel, BatchedInferencePipeline)
+_models: dict[str, tuple[WhisperModel, BatchedInferencePipeline]] = {}
 _device_info = {}
+
+# Shared progress dict for real-time transcription progress tracking.
+# Keyed by job_id, value is progress float (0.0 to 1.0) or None when unknown.
+_progress: dict[str, float | None] = {}
 
 
 def _get_gpu_info() -> dict:
@@ -91,50 +95,55 @@ def _detect_device() -> tuple[str, str, int]:
     return "cuda", compute_type, cc_int
 
 
-def load_model():
-    global _model, _batched, _device_info
-    if _model is not None:
+def get_loaded_models() -> list[str]:
+    """Return list of currently loaded model names."""
+    return list(_models.keys())
+
+
+def load_model(model_name: str | None = None) -> None:
+    """Load a specific model into the cache. If model_name is None, load WHISPER_MODEL."""
+    global _device_info
+
+    target = model_name or WHISPER_MODEL
+
+    if target in _models:
+        logger.info("Model %s already loaded", target)
         return
 
-    device, compute_type, cc = _detect_device()
-    _device_info.update({"device": device, "compute_type": compute_type, "compute_capability": cc})
+    if not _device_info:
+        device, compute_type, cc = _detect_device()
+        _device_info.update({"device": device, "compute_type": compute_type, "compute_capability": cc})
 
-    logger.info("Loading model %s on %s (%s)...", WHISPER_MODEL, device, compute_type)
+    device = _device_info.get("device", "cpu")
+    compute_type = _device_info.get("compute_type", "int8")
+
+    logger.info("Loading model %s on %s (%s)...", target, device, compute_type)
 
     try:
-        _model = WhisperModel(
-            WHISPER_MODEL,
+        model = WhisperModel(
+            target,
             device=device,
             compute_type=compute_type,
         )
     except RuntimeError as e:
         if "out of memory" in str(e).lower() and device == "cuda":
             logger.warning(
-                "GPU OOM with %s on %s, falling back to CPU int8", WHISPER_MODEL, compute_type
+                "GPU OOM with %s on %s, falling back to CPU int8", target, compute_type
             )
             device, compute_type, cc = "cpu", "int8", 0
             _device_info = {"device": device, "compute_type": compute_type, "compute_capability": cc}
-            _model = WhisperModel(
-                WHISPER_MODEL,
+            model = WhisperModel(
+                target,
                 device=device,
                 compute_type=compute_type,
             )
         else:
             raise
 
-    if device == "cuda":
-        batch_size = 16
-    else:
-        batch_size = 1
-
-    _batched = BatchedInferencePipeline(model=_model)
-    logger.info("Model %s loaded on %s/%s (batch_size=%d).", WHISPER_MODEL, device, compute_type, batch_size)
-
-
-# Shared progress dict for real-time transcription progress tracking.
-# Keyed by job_id, value is progress float (0.0 to 1.0) or None when unknown.
-# Written from transcription threads; reads are atomic in CPython.
-_progress: dict[str, float | None] = {}
+    batch_size = 16 if device == "cuda" else 1
+    batched = BatchedInferencePipeline(model=model)
+    _models[target] = (model, batched)
+    logger.info("Model %s loaded on %s/%s (batch_size=%d).", target, device, compute_type, batch_size)
 
 
 def get_progress(job_id: str) -> float | None:
@@ -147,14 +156,21 @@ def _transcribe_sync(
     audio_path: str,
     language: str,
     job_id: str,
+    model_name: str | None = None,
 ) -> dict:
     """Synchronous transcription function that runs entirely in a thread.
     Consumes the segment generator inside the thread so the asyncio event loop
     is never blocked. Updates real progress in _progress dict during iteration."""
+    target = model_name or WHISPER_MODEL
     device = _device_info.get("device", "cpu")
 
+    # Get or load the model
+    if target not in _models:
+        load_model(target)
+    _model, batched = _models[target]
+
     start = time.monotonic()
-    segments, info = _batched.transcribe(
+    segments, info = batched.transcribe(
         audio_path,
         language=language or "en",
         batch_size=16 if device == "cuda" else 1,
@@ -168,12 +184,13 @@ def _transcribe_sync(
     )
     elapsed = time.monotonic() - start
 
-    logger.info("Transcription done in %.2fs device=%s", elapsed, device)
+    logger.info("Transcription done in %.2fs device=%s model=%s", elapsed, device, target)
 
     result = {"id": job_id, "segments": []}
     result["language"] = info.language
     result["device"] = _device_info.get("device", "unknown")
     result["compute_type"] = _device_info.get("compute_type", "unknown")
+    result["model"] = target
 
     audio_duration = info.duration  # total audio duration in seconds
     full_text_parts = []
@@ -183,7 +200,6 @@ def _transcribe_sync(
     for seg in segments:
         text = seg.text.strip()
         if not text:
-            # Still track position even for empty segments
             max_end = max(max_end, seg.end)
             if audio_duration and audio_duration > 0:
                 _progress[job_id] = min(1.0, max_end / audio_duration)
@@ -217,8 +233,10 @@ async def transcribe_audio(
     audio_path: str,
     language: str = None,
     job_id: str = "unknown",
+    model_name: str | None = None,
 ) -> dict:
     """Transcribe audio in a thread. Never blocks the asyncio event loop.
+    Optionally specify model_name to use a specific Whisper model.
     Returns the result dict once both inference and segment iteration complete."""
     _progress[job_id] = 0.0
     try:
@@ -227,6 +245,7 @@ async def transcribe_audio(
             audio_path,
             language or "en",
             job_id,
+            model_name,
         )
         _progress[job_id] = 1.0
         return result

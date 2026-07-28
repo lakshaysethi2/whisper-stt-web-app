@@ -68,6 +68,23 @@
       </button>
     </div>
 
+    <!-- Model Choice Card -->
+    <div class="card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        Model
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="model-select">Choose a model</label>
+        <select id="model-select" required>
+          <option value="">-- Choose a model --</option>
+          <option value="base">base — faster, lighter on CPU/RAM, good for drafts/short audio; lower quality</option>
+          <option value="large-v3-turbo">large-v3-turbo — much better quality; slower, heavier; long files take longer</option>
+        </select>
+        <p class="form-hint" id="device-hint"></p>
+      </div>
+    </div>
+
     <!-- Language Card -->
     <div class="card">
       <div class="form-group">
@@ -169,6 +186,27 @@
       <div class="segments-list hidden" id="segments-wrapper">
         <div class="segments-title">Segments</div>
         <div id="segments"></div>
+      </div>
+    </div>
+
+    <!-- Browser STT Links -->
+    <div class="card browser-stt-card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        Transcribe in your browser (other sites)
+      </div>
+      <div class="browser-stt-body">
+        <p class="browser-stt-note">These run entirely on <strong>your device</strong>, not this server. Large files may struggle on phones.</p>
+        <div class="browser-stt-links">
+          <a class="btn btn-outline btn-sm" href="https://huggingface.co/spaces/Xenova/whisper-web" target="_blank" rel="noopener">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            Xenova/whisper-web
+          </a>
+          <a class="btn btn-outline btn-sm" href="https://huggingface.co/spaces/Xenova/whisper-webgpu" target="_blank" rel="noopener">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            Xenova/whisper-webgpu
+          </a>
+        </div>
       </div>
     </div>
   </main>

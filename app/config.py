@@ -22,6 +22,8 @@ ALLOWED_EXTENSIONS = {
     ".m4v", ".asf",
 }
 
+UI_MODEL_CHOICES = ["base", "large-v3-turbo"]
+
 SUPPORTED_MODELS = [
     {"name": "tiny", "params": "39M", "vram_fp32": "200", "vram_fp16": "128"},
     {"name": "base", "params": "74M", "vram_fp32": "400", "vram_fp16": "256"},
@@ -30,6 +32,22 @@ SUPPORTED_MODELS = [
     {"name": "large-v3", "params": "1550M", "vram_fp32": "6200", "vram_fp16": "3100"},
     {"name": "large-v3-turbo", "params": "809M", "vram_fp32": "3400", "vram_fp16": "1700"},
 ]
+
+
+def validate_model(model_name: str | None) -> str:
+    """Validate a model choice. Returns the validated model name or raises HTTPException(400)."""
+    if not model_name or not isinstance(model_name, str) or not model_name.strip():
+        from fastapi import HTTPException
+        raise HTTPException(400, "Model choice is required. Choose 'base' or 'large-v3-turbo'.")
+    model_name = model_name.strip()
+    valid_names = UI_MODEL_CHOICES
+    if model_name not in valid_names:
+        from fastapi import HTTPException
+        raise HTTPException(
+            400,
+            f"Invalid model: '{model_name}'. Valid choices: {', '.join(valid_names)}",
+        )
+    return model_name
 
 
 def get_job_dir(job_id: str) -> Path:

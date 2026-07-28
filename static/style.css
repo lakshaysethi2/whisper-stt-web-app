@@ -603,6 +603,43 @@ select:focus {
   margin-top: 4px;
 }
 
+/* Model choice hint */
+.form-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* Browser STT card */
+.browser-stt-card {
+  border-color: var(--border-light);
+  background: color-mix(in srgb, var(--bg-card-hover) 70%, transparent);
+}
+
+.browser-stt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.browser-stt-note {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.browser-stt-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.browser-stt-links .btn {
+  flex: 1;
+  min-width: 160px;
+}
+
 /* Toast */
 .toast {
   position: fixed;

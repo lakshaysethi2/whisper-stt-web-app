@@ -17,10 +17,12 @@ import time
 from app.config import (
     WHISPER_MODEL, WHISPER_LANGUAGE, MAX_FILE_SIZE,
     MIN_FREE_DISK_BYTES, check_disk_space,
-    ALLOWED_EXTENSIONS, SUPPORTED_MODELS, get_job_dir, cleanup_job,
+    ALLOWED_EXTENSIONS, SUPPORTED_MODELS, UI_MODEL_CHOICES,
+    validate_model,
+    get_job_dir, cleanup_job,
     cleanup_all_jobs, WORK_DIR, JOB_RETENTION_SECONDS,
 )
-from app.transcriber import load_model, transcribe_audio, get_progress, _device_info
+from app.transcriber import load_model, transcribe_audio, get_progress, get_loaded_models, _device_info
 
 logging.basicConfig(
     level=logging.INFO,
@@ -289,6 +291,8 @@ async def list_models():
         "device": _device_info.get("device", "unknown"),
         "compute_type": _device_info.get("compute_type", "unknown"),
         "available": SUPPORTED_MODELS,
+        "ui_choices": UI_MODEL_CHOICES,
+        "loaded": get_loaded_models(),
     }
 
 
@@ -488,6 +492,7 @@ async def upload_chunk(
 async def upload_finish(
     upload_id: str,
     language: str = Query(default=""),
+    model: str = Query(default=""),
 ):
     if upload_id in _finish_locks:
         raise HTTPException(409, "Upload is already being finalized")
@@ -532,6 +537,9 @@ async def upload_finish(
                 400,
                 f"Invalid language code: {lang}. Expected format: xx or xx-XX (e.g. en, en-US)",
             )
+
+        # Validate model choice (required, no silent default)
+        chosen_model = validate_model(model)
 
         ext = Path(meta["filename"]).suffix.lower()
         job_id = uuid.uuid4().hex
@@ -585,7 +593,7 @@ async def upload_finish(
 
         async def _run_transcription():
             try:
-                result = await transcribe_audio(str(file_path), lang, job_id)
+                result = await transcribe_audio(str(file_path), lang, job_id, model_name=chosen_model)
                 logger.info(
                     "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
                     job_id, len(result.get("segments", [])),
@@ -598,6 +606,7 @@ async def upload_finish(
                         "status": "completed",
                         "progress": 1.0,
                         "result": result,
+                        "model": chosen_model,
                         "created_at": created_at,
                     }
                 _persist_job(job_id, _jobs[job_id])
@@ -607,6 +616,7 @@ async def upload_finish(
                     _jobs[job_id] = {
                         "status": "failed",
                         "error": str(e),
+                        "model": chosen_model,
                         "created_at": _jobs[job_id]["created_at"],
                     }
                 _persist_job(job_id, _jobs[job_id])
@@ -670,6 +680,7 @@ async def transcribe_status(job_id: str):
 async def transcribe(
     file: UploadFile = File(...),
     language: str = Form(default=""),
+    model: str = Form(default=""),
 ):
     """
     Upload a file for transcription (synchronous/small files).
@@ -718,11 +729,15 @@ async def transcribe(
         cleanup_job(job_id)
         raise HTTPException(400, f"Invalid language code: {lang}. Expected format: xx or xx-XX (e.g. en, en-US)")
 
+    # Validate model choice (required, no silent default)
+    chosen_model = validate_model(model)
+
     # Register the job BEFORE spawning the background task
     async with _jobs_lock:
         _jobs[job_id] = {
             "status": "processing",
             "progress": 0.0,
+            "model": chosen_model,
             "created_at": time.time(),
         }
 
@@ -733,7 +748,7 @@ async def transcribe(
 
     async def _run_transcribe():
         try:
-            result = await transcribe_audio(str(file_path), lang, job_id)
+            result = await transcribe_audio(str(file_path), lang, job_id, model_name=chosen_model)
             logger.info(
                 "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
                 job_id, len(result.get("segments", [])),
@@ -744,6 +759,7 @@ async def transcribe(
                     "status": "completed",
                     "progress": 1.0,
                     "result": result,
+                    "model": chosen_model,
                     "created_at": _jobs[job_id]["created_at"],
                 }
             _persist_job(job_id, _jobs[job_id])
@@ -753,6 +769,7 @@ async def transcribe(
                 _jobs[job_id] = {
                     "status": "failed",
                     "error": str(e),
+                    "model": chosen_model,
                     "created_at": _jobs[job_id]["created_at"],
                 }
             _persist_job(job_id, _jobs[job_id])

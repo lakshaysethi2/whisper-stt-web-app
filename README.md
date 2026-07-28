@@ -104,6 +104,29 @@ See [.env.example](.env.example) for all options.
 | 8 GB VRAM | large-v3-turbo | float16, batch=16 |
 | 12 GB+ VRAM | large-v3 | float16, batch=16 |
 
+### Mandatory Model Choice
+
+Users must **explicitly choose** a Whisper model before transcribing. The UI offers two options:
+
+| Model | Tradeoff |
+|-------|----------|
+| **base** | Faster, lighter on CPU/RAM, OK for drafts/short audio; **lower** transcript quality. |
+| **large-v3-turbo** | Much better quality (recommended for best accuracy); slower and heavier on CPU/RAM; long files take longer. |
+
+- No pre-selected default — the user must actively pick.
+- The server rejects transcribe/finish requests with a `400` error if `model` is missing or invalid.
+- The server shows the runtime device (cpu vs cuda) so the user understands server load.
+- Models are loaded on demand with lazy caching: switching model in the UI loads it into memory.
+
+### Browser-based STT (third-party)
+
+The app includes a UI section linking to free browser-based Whisper demos that run entirely on your device:
+
+- [Xenova/whisper-web](https://huggingface.co/spaces/Xenova/whisper-web)
+- [Xenova/whisper-webgpu](https://huggingface.co/spaces/Xenova/whisper-webgpu)
+
+These run on the client machine (not this server). Large files may struggle on phones.
+
 ## GPU Compatibility
 
 | Architecture | Compute Capability | Example GPUs | Compute Type |
@@ -209,6 +232,7 @@ Upload an audio or video file for transcription.
 **Request:** `multipart/form-data`
 - `file` — Audio or video file (required)
 - `language` — Language code, e.g. `en`, `es`, `fr` (optional, defaults to `en`)
+- `model` — Whisper model name, `base` or `large-v3-turbo` (required, no default)
 
 **Response:** `application/json`
 ```json
