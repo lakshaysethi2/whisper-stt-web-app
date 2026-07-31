@@ -1,0 +1,7 @@
+{
+  "name": "whisper-stt-web-app",
+  "private": true,
+  "devDependencies": {
+    "cypress": "^14.3.0"
+  }
+}

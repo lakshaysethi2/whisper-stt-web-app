@@ -16,10 +16,13 @@ import time
 
 from app.config import (
     WHISPER_MODEL, WHISPER_LANGUAGE, MAX_FILE_SIZE,
-    ALLOWED_EXTENSIONS, SUPPORTED_MODELS, get_job_dir, cleanup_job,
-    cleanup_all_jobs, WORK_DIR,
+    MIN_FREE_DISK_BYTES, check_disk_space,
+    ALLOWED_EXTENSIONS, SUPPORTED_MODELS, UI_MODEL_CHOICES,
+    validate_model,
+    get_job_dir, cleanup_job,
+    cleanup_all_jobs, WORK_DIR, JOB_RETENTION_SECONDS,
 )
-from app.transcriber import load_model, transcribe_audio, _device_info
+from app.transcriber import load_model, transcribe_audio, get_progress, get_loaded_models, _device_info
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,17 +59,65 @@ _jobs_lock: asyncio.Lock = asyncio.Lock()
 # Track running transcription tasks so they aren't garbage-collected
 # and can be awaited/cancelled on shutdown.
 _tasks: set[asyncio.Task] = set()
-JOB_MAX_AGE_SECONDS = 30 * 60  # 30 minutes
 
 
-async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1800):
-    logger.info("Starting periodic cleanup task (interval=%ds, max_age=%ds)", interval_seconds, max_age_seconds)
+def _status_file(job_dir: Path) -> Path:
+    return job_dir / "status.json"
+
+
+def _persist_job(job_id: str, job_data: dict) -> None:
+    """Best-effort write job status+result to disk for resume after restart."""
+    try:
+        job_dir = get_job_dir(job_id)
+        sf = _status_file(job_dir)
+        # Strip non-serializable fields
+        persist = {k: v for k, v in job_data.items() if k != "task"}
+        sf.write_text(json.dumps(persist, default=str))
+    except Exception as e:
+        logger.warning("Failed to persist job %s to disk: %s", job_id, e)
+
+
+def _load_persisted_jobs() -> dict[str, dict]:
+    """Load completed/failed job statuses from disk into in-memory store.
+    Running jobs from a previous process are treated as unknown/expired.
+    """
+    loaded: dict[str, dict] = {}
+    if not WORK_DIR.exists():
+        return loaded
+    for p in list(WORK_DIR.iterdir()):
+        if not p.is_dir() or p.name == "chunks":
+            continue
+        sf = p / "status.json"
+        if not sf.exists():
+            continue
+        try:
+            data = json.loads(sf.read_text())
+            if data.get("status") in ("completed", "failed"):
+                job_id = p.name
+                data["created_at"] = data.get("created_at", p.stat().st_mtime)
+                loaded[job_id] = data
+                logger.info("Loaded persisted job %s (status=%s)", job_id, data["status"])
+        except Exception as e:
+            logger.warning("Failed to load persisted job %s: %s", p.name, e)
+    return loaded
+
+
+async def periodic_cleanup(interval_seconds: int = 600):
+    max_age = JOB_RETENTION_SECONDS
+    logger.info("Starting periodic cleanup task (interval=%ds, max_age=%ds)", interval_seconds, max_age)
     while True:
         try:
             await asyncio.sleep(interval_seconds)
             now = time.time()
             if not WORK_DIR.exists():
                 continue
+
+            # Track which job_ids are still running (in-memory)
+            running_ids: set[str] = set()
+            async with _jobs_lock:
+                for jid, jstate in _jobs.items():
+                    if jstate.get("status") in ("processing", "pending"):
+                        running_ids.add(jid)
 
             for p in list(WORK_DIR.iterdir()):
                 try:
@@ -86,15 +137,19 @@ async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1
                                         created = meta.get("created", created)
                                     except Exception:
                                         pass
-                                if now - created > max_age_seconds:
+                                if now - created > max_age:
                                     logger.info("Removing expired chunk session: %s (age: %.1fs)", cp.name, now - created)
                                     shutil.rmtree(cp, ignore_errors=True)
                             except Exception as cp_err:
                                 logger.error("Error cleaning up chunk session %s: %s", cp.name, cp_err)
                         continue
 
+                    # Skip still-running jobs
+                    if p.name in running_ids:
+                        continue
+
                     mtime = p.stat().st_mtime
-                    if now - mtime > max_age_seconds:
+                    if now - mtime > max_age:
                         logger.info("Removing expired job directory: %s (age: %.1fs)", p.name, now - mtime)
                         shutil.rmtree(p, ignore_errors=True)
                 except Exception as p_err:
@@ -106,10 +161,18 @@ async def periodic_cleanup(interval_seconds: int = 600, max_age_seconds: int = 1
                 stale = []
                 async with _jobs_lock:
                     for jid, jstate in list(_jobs.items()):
-                        if now_ts - jstate.get("created_at", 0) > JOB_MAX_AGE_SECONDS:
+                        if now_ts - jstate.get("created_at", 0) > max_age:
                             stale.append(jid)
                     for jid in stale:
                         _jobs.pop(jid, None)
+                        # Also remove disk status file for expired jobs
+                        job_dir = WORK_DIR / jid
+                        sf = _status_file(job_dir)
+                        if sf.exists():
+                            try:
+                                sf.unlink()
+                            except Exception:
+                                pass
                 if stale:
                     logger.info("Removed %d expired transcription jobs from store", len(stale))
             except Exception as jc_err:
@@ -131,8 +194,36 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Error during startup cleanup: %s", e)
 
+    # Check disk space at startup
+    free_ok = check_disk_space()
+    if not free_ok:
+        logger.warning(
+            "Low disk space at startup: free below MIN_FREE_DISK_BYTES (%d bytes). "
+            "Uploads may be rejected.",
+            MIN_FREE_DISK_BYTES,
+        )
+    else:
+        usage = __import__("shutil").disk_usage(str(WORK_DIR))
+        logger.info(
+            "Disk space OK: %d MB free (threshold %d MB)",
+            usage.free // (1024 * 1024),
+            MIN_FREE_DISK_BYTES // (1024 * 1024),
+        )
+
     # Ensure the chunk directory exists after startup cleanup
     CHUNK_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Load persisted completed/failed jobs from disk (best-effort resume)
+    try:
+        persisted = _load_persisted_jobs()
+        if persisted:
+            async with _jobs_lock:
+                for jid, jdata in persisted.items():
+                    if jid not in _jobs:
+                        _jobs[jid] = jdata
+            logger.info("Loaded %d persisted jobs from disk", len(persisted))
+    except Exception as e:
+        logger.warning("Failed to load persisted jobs: %s", e)
 
     # Start the background periodic cleanup task
     cleanup_task = asyncio.create_task(periodic_cleanup())
@@ -175,6 +266,13 @@ async def index():
     return FileResponse("static/index.html")
 
 
+@app.get("/j/{job_id}")
+async def job_page(job_id: str):
+    """SPA route for bookmarkable job pages.
+    Serves the same index.html; the frontend reads job_id from path."""
+    return FileResponse("static/index.html")
+
+
 @app.get("/health")
 async def health():
     return {
@@ -193,6 +291,8 @@ async def list_models():
         "device": _device_info.get("device", "unknown"),
         "compute_type": _device_info.get("compute_type", "unknown"),
         "available": SUPPORTED_MODELS,
+        "ui_choices": UI_MODEL_CHOICES,
+        "loaded": get_loaded_models(),
     }
 
 
@@ -392,6 +492,7 @@ async def upload_chunk(
 async def upload_finish(
     upload_id: str,
     language: str = Query(default=""),
+    model: str = Query(default=""),
 ):
     if upload_id in _finish_locks:
         raise HTTPException(409, "Upload is already being finalized")
@@ -437,8 +538,11 @@ async def upload_finish(
                 f"Invalid language code: {lang}. Expected format: xx or xx-XX (e.g. en, en-US)",
             )
 
+        # Validate model choice (required, no silent default)
+        chosen_model = validate_model(model)
+
         ext = Path(meta["filename"]).suffix.lower()
-        job_id = str(uuid.uuid4())[:8]
+        job_id = uuid.uuid4().hex
         job_dir = get_job_dir(job_id)
         file_path = job_dir / f"input{ext}"
 
@@ -489,27 +593,33 @@ async def upload_finish(
 
         async def _run_transcription():
             try:
-                result = await transcribe_audio(str(file_path), lang, job_id)
+                result = await transcribe_audio(str(file_path), lang, job_id, model_name=chosen_model)
                 logger.info(
                     "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
                     job_id, len(result.get("segments", [])),
                     result.get("duration", 0), result.get("process_time", 0),
                 )
+                created_at: float = 0.0
                 async with _jobs_lock:
+                    created_at = _jobs[job_id]["created_at"]
                     _jobs[job_id] = {
                         "status": "completed",
                         "progress": 1.0,
                         "result": result,
-                        "created_at": _jobs[job_id]["created_at"],
+                        "model": chosen_model,
+                        "created_at": created_at,
                     }
+                _persist_job(job_id, _jobs[job_id])
             except Exception as e:
                 logger.error("Transcription failed job=%s error=%s", job_id, str(e))
                 async with _jobs_lock:
                     _jobs[job_id] = {
                         "status": "failed",
                         "error": str(e),
+                        "model": chosen_model,
                         "created_at": _jobs[job_id]["created_at"],
                     }
+                _persist_job(job_id, _jobs[job_id])
             finally:
                 cleanup_job(job_id)
 
@@ -550,10 +660,14 @@ async def transcribe_status(job_id: str):
         "elapsed_seconds": round(elapsed, 1),
     }
     if job["status"] == "processing":
-        # crude progress hint: cap at 0.9 so the UI doesn't look "done" until completed.
-        # Without a real estimate, we just tick up slowly so the UI shows motion.
-        # ~0.9 at 60s elapsed is a reasonable default for English audio.
-        response["progress"] = min(0.9, elapsed / 60.0)
+        # Real progress from transcriber (audio position / total duration)
+        real_progress = get_progress(job_id)
+        if real_progress is not None:
+            response["progress"] = min(0.99, real_progress)  # cap below 1.0 until fully complete
+        else:
+            # No real progress data yet (model still loading / VAD analyzing)
+            response["progress"] = 0.0
+            response["progress_note"] = "working"  # honest signal: we are working, % unknown
     elif job["status"] == "completed":
         response["progress"] = 1.0
         response["result"] = job["result"]
@@ -566,19 +680,37 @@ async def transcribe_status(job_id: str):
 async def transcribe(
     file: UploadFile = File(...),
     language: str = Form(default=""),
+    model: str = Form(default=""),
 ):
+    """
+    Upload a file for transcription (synchronous/small files).
+    Saves file, registers a job, spawns background transcription, and returns
+    {job_id, status, progress} immediately. Poll GET /api/transcribe/status/{job_id}
+    for the result.
+    """
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, f"Unsupported format: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
 
-    job_id = str(uuid.uuid4())[:8]
+    job_id = uuid.uuid4().hex
     job_dir = get_job_dir(job_id)
     file_path = job_dir / f"input{ext}"
 
+    # Reject early if disk space is critically low
+    if not check_disk_space():
+        # Try cleaning stale jobs first, then recheck
+        cleanup_all_jobs()
+        if not check_disk_space():
+            raise HTTPException(
+                507,
+                f"Server disk space too low. Minimum required: "
+                f"{MIN_FREE_DISK_BYTES // (1024*1024)} MB",
+            )
+
+    # Stream uploaded file to disk in chunks to avoid high RAM usage
+    chunk_size = 1024 * 1024  # 1 MB chunks
+    total_bytes = 0
     try:
-        # Stream uploaded file to disk in chunks to avoid high RAM usage
-        chunk_size = 1024 * 1024  # 1 MB chunks
-        total_bytes = 0
         with file_path.open("wb") as buffer:
             while True:
                 chunk = await file.read(chunk_size)
@@ -588,25 +720,71 @@ async def transcribe(
                 if total_bytes > MAX_FILE_SIZE:
                     raise HTTPException(413, f"File too large. Max: {MAX_FILE_SIZE // (1024*1024)} MB")
                 buffer.write(chunk)
-
-        lang = language or WHISPER_LANGUAGE or "en"
-        if not VALID_LANG_RE.match(lang):
-            raise HTTPException(400, f"Invalid language code: {lang}. Expected format: xx or xx-XX (e.g. en, en-US)")
-
-        logger.info("Transcribing %s (%d bytes) lang=%s job=%s", file.filename, total_bytes, lang, job_id)
-
-        result = await transcribe_audio(str(file_path), lang, job_id)
-        logger.info("Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
-                     job_id, len(result.get("segments", [])),
-                     result.get("duration", 0), result.get("process_time", 0))
-        return JSONResponse(result)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Transcription failed job=%s error=%s", job_id, str(e))
-        raise HTTPException(500, f"Transcription failed: {str(e)}")
-    finally:
+    except Exception:
         cleanup_job(job_id)
+        raise
+
+    lang = language or WHISPER_LANGUAGE or "en"
+    if not VALID_LANG_RE.match(lang):
+        cleanup_job(job_id)
+        raise HTTPException(400, f"Invalid language code: {lang}. Expected format: xx or xx-XX (e.g. en, en-US)")
+
+    # Validate model choice (required, no silent default)
+    chosen_model = validate_model(model)
+
+    # Register the job BEFORE spawning the background task
+    async with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "processing",
+            "progress": 0.0,
+            "model": chosen_model,
+            "created_at": time.time(),
+        }
+
+    logger.info(
+        "Transcribing %s (%d bytes) lang=%s job=%s",
+        file.filename, total_bytes, lang, job_id,
+    )
+
+    async def _run_transcribe():
+        try:
+            result = await transcribe_audio(str(file_path), lang, job_id, model_name=chosen_model)
+            logger.info(
+                "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
+                job_id, len(result.get("segments", [])),
+                result.get("duration", 0), result.get("process_time", 0),
+            )
+            async with _jobs_lock:
+                _jobs[job_id] = {
+                    "status": "completed",
+                    "progress": 1.0,
+                    "result": result,
+                    "model": chosen_model,
+                    "created_at": _jobs[job_id]["created_at"],
+                }
+            _persist_job(job_id, _jobs[job_id])
+        except Exception as e:
+            logger.error("Transcription failed job=%s error=%s", job_id, str(e))
+            async with _jobs_lock:
+                _jobs[job_id] = {
+                    "status": "failed",
+                    "error": str(e),
+                    "model": chosen_model,
+                    "created_at": _jobs[job_id]["created_at"],
+                }
+            _persist_job(job_id, _jobs[job_id])
+        finally:
+            cleanup_job(job_id)
+
+    task = asyncio.create_task(_run_transcribe())
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+    return JSONResponse({
+        "job_id": job_id,
+        "status": "processing",
+        "progress": 0.0,
+    })
 
 
 if __name__ == "__main__":

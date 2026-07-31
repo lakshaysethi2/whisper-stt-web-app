@@ -6,3 +6,13 @@ __pycache__/
 .DS_Store
 node_modules/
 .mimocode/
+!test_audio/*.flac
+!test_audio/*_transcript.txt
+!test_audio/SOURCES.md
+docker-compose.override.yml
+.testvenv/
+
+# Cypress artifacts (NOT specs)
+cypress/screenshots/
+cypress/videos/
+cypress/downloads/

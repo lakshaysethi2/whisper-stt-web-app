@@ -103,6 +103,22 @@ header h1 {
   letter-spacing: -0.02em;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-new-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.header-new-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
 .model-badge {
   font-size: 0.7rem;
   font-weight: 600;
@@ -532,6 +548,151 @@ select:focus {
 
 .hidden {
   display: none !important;
+}
+
+/* Save link card */
+.save-link-card {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary-glow) 50%, var(--bg-card));
+}
+
+.save-link-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.save-link-desc {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.save-link-url-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.save-link-url {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--primary-light);
+  word-break: break-all;
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+}
+
+.save-link-url:hover {
+  text-decoration: underline;
+}
+
+.save-link-copy,
+.save-link-close {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Resume view (job page) */
+.resume-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.resume-view .resume-error {
+  padding: 12px 16px;
+  background: var(--danger-glow);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
+.resume-home-btn {
+  margin-top: 4px;
+}
+
+/* Model choice error state */
+.model-error {
+  font-size: 0.82rem;
+  color: var(--danger);
+  margin-top: 6px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  background: var(--danger-glow);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: var(--radius-sm);
+  animation: shake 0.3s ease;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+
+select.input-error {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-glow);
+}
+
+.required-star {
+  color: var(--danger);
+  font-size: 0.9rem;
+}
+
+/* Result "Start new transcription" button */
+.result-new-btn {
+  white-space: nowrap;
+}
+
+.result-new-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Model choice hint */
+.form-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* Browser STT card */
+.browser-stt-card {
+  border-color: var(--border-light);
+  background: color-mix(in srgb, var(--bg-card-hover) 70%, transparent);
+}
+
+.browser-stt-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.browser-stt-note {
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.browser-stt-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.browser-stt-links .btn {
+  flex: 1;
+  min-width: 160px;
 }
 
 /* Toast */

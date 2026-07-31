@@ -29,6 +29,20 @@
     copyBtn: $("#copy-btn"),
     downloadBtn: $("#download-btn"),
     modelBadge: $("#model-badge"),
+    modelSelect: $("#model-select"),
+    deviceHint: $("#device-hint"),
+    saveLink: $("#save-link"),
+    saveLinkUrl: $("#save-link-url"),
+    saveLinkCopy: $("#save-link-copy"),
+    saveLinkClose: $("#save-link-close"),
+    resumeView: $("#resume-view"),
+    resumeStatus: $("#resume-status"),
+    resumeTitle: $("#resume-title"),
+    resumeError: $("#resume-error"),
+    resumeHomeBtn: $("#resume-home-btn"),
+    headerNewBtn: $("#header-new-btn"),
+    resultNewBtn: $("#result-new-btn"),
+    modelError: $("#model-error"),
   };
 
   const uploadConfig = {
@@ -36,7 +50,27 @@
     directUploadThreshold: 50 * 1024 * 1024,
   };
 
+  let pollTimer = null;
+  let currentJobId = null;
+
   init();
+
+  // --- URL helpers ---
+
+  function getJobIdFromPath() {
+    const m = window.location.pathname.match(/^\/j\/([a-f0-9]{32})$/);
+    return m ? m[1] : null;
+  }
+
+  function setJobUrl(jobId) {
+    const url = window.location.origin + "/j/" + jobId;
+    window.history.replaceState({ jobId }, "", url);
+    return url;
+  }
+
+  function absoluteJobUrl(jobId) {
+    return window.location.origin + "/j/" + jobId;
+  }
 
   async function init() {
     if ("serviceWorker" in navigator) {
@@ -51,7 +85,10 @@
 
       if (modelsResult.status === "fulfilled" && modelsResult.value.ok) {
         const modelsData = await modelsResult.value.json();
-        if (els.modelBadge) els.modelBadge.textContent = modelsData.current;
+        if (els.modelBadge) els.modelBadge.textContent = modelsData.current || "?";
+        if (els.deviceHint) {
+          els.deviceHint.textContent = "Server runs on " + (modelsData.device || "?").toUpperCase() + " · " + (modelsData.compute_type || "?");
+        }
       }
 
       if (configResult.status === "fulfilled" && configResult.value.ok) {
@@ -61,9 +98,188 @@
       }
     } catch {}
 
-    setupRecording();
-    setupFileUpload();
+    // Check if we loaded into a job page
+    const jobId = getJobIdFromPath();
+    if (jobId) {
+      await resumeJob(jobId);
+    } else {
+      setupRecording();
+      setupFileUpload();
+      showMainUI();
+    }
     setupActions();
+  }
+
+  // --- Resume job from URL ---
+
+  async function resumeJob(jobId) {
+    hideMainUI();
+    showResumeLoading();
+
+    let status;
+    try {
+      const r = await fetch(`/api/transcribe/status/${jobId}`);
+      if (!r.ok) {
+        if (r.status === 404) {
+          showResumeExpired(jobId);
+          return;
+        }
+        showResumeError("Server error: " + r.statusText);
+        return;
+      }
+      status = await r.json();
+    } catch (err) {
+      showResumeError("Network error: " + err.message);
+      return;
+    }
+
+    if (status.status === "completed") {
+      showResumeResult(status.result, jobId);
+    } else if (status.status === "failed") {
+      showResumeError(status.error || "Transcription failed");
+    } else {
+      // processing / pending — show progress and start polling
+      showResumeProgress(status, jobId);
+      startResumePolling(jobId);
+    }
+  }
+
+  function startResumePolling(jobId) {
+    if (pollTimer) clearInterval(pollTimer);
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_TIMEOUT_MS = 3 * 3600 * 1000; // 3 hours (backend retention default is 2h, generous margin)
+    const pollStart = Date.now();
+
+    pollTimer = setInterval(async () => {
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        clearInterval(pollTimer);
+        showResumeError("Job timed out — it may have been removed from the server.");
+        return;
+      }
+      try {
+        const r = await fetch(`/api/transcribe/status/${jobId}`);
+        if (!r.ok) {
+          if (r.status === 404) {
+            clearInterval(pollTimer);
+            showResumeExpired(jobId);
+            return;
+          }
+          return; // retry on next tick
+        }
+        const status = await r.json();
+        if (status.status === "completed") {
+          clearInterval(pollTimer);
+          showResumeResult(status.result, jobId);
+        } else if (status.status === "failed") {
+          clearInterval(pollTimer);
+          showResumeError(status.error || "Transcription failed");
+        } else {
+          showResumeProgress(status, jobId);
+        }
+      } catch {
+        // network blip — retry
+      }
+    }, POLL_INTERVAL_MS);
+  }
+
+  // --- UI visibility helpers ---
+
+  function showMainUI() {
+    els.resumeView.classList.add("hidden");
+    document.querySelectorAll(".card:not(#resume-view)").forEach((el) => el.classList.remove("hidden"));
+  }
+
+  function hideMainUI() {
+    document.querySelectorAll(".card:not(#resume-view)").forEach((el) => el.classList.add("hidden"));
+    els.resumeView.classList.remove("hidden");
+    els.status.classList.add("hidden");
+    els.result.classList.add("hidden");
+    els.saveLink.classList.add("hidden");
+  }
+
+  function showResumeLoading() {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Resuming transcription job...";
+    els.resumeStatus.classList.remove("hidden");
+    els.resumeStatus.innerHTML = '<div class="spinner"></div><span>Fetching job status...</span>';
+    els.resumeError.classList.add("hidden");
+    els.resumeHomeBtn.classList.remove("hidden");
+  }
+
+  function showResumeProgress(status, jobId) {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Transcription in progress";
+    els.resumeStatus.classList.remove("hidden");
+    const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
+    let progressMsg;
+    if (status.progress_note === "working") {
+      progressMsg = `Transcribing... ${elapsed}s elapsed (working, progress unknown)`;
+    } else {
+      const pct = Math.round((status.progress || 0) * 100);
+      progressMsg = `Transcribing... ${elapsed}s elapsed (${pct}%)`;
+    }
+    els.resumeStatus.innerHTML = `<div class="spinner"></div><span>${escapeHtml(progressMsg)}</span>`;
+    els.resumeError.classList.add("hidden");
+    els.resumeHomeBtn.classList.remove("hidden");
+  }
+
+  function showResumeResult(result, jobId) {
+    els.resumeView.classList.add("hidden");
+    showMainUI();
+    showResult(result);
+    // Add the save link with the completed job URL
+    showSaveLink(jobId);
+    // Show "Start new transcription" button in the result toolbar
+    if (els.resultNewBtn) {
+      els.resultNewBtn.classList.remove("hidden");
+    }
+  }
+
+  function showResumeError(msg) {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Transcription failed";
+    els.resumeStatus.classList.add("hidden");
+    els.resumeError.classList.remove("hidden");
+    els.resumeError.textContent = msg;
+    els.resumeHomeBtn.classList.remove("hidden");
+  }
+
+  function showResumeExpired(jobId) {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Job not found";
+    els.resumeStatus.classList.add("hidden");
+    els.resumeError.classList.remove("hidden");
+    els.resumeError.textContent =
+      "This transcription job has expired or the server has restarted. " +
+      "Jobs are kept for a limited time. Please start a new transcription.";
+    els.resumeHomeBtn.classList.remove("hidden");
+  }
+
+  // --- Save link UI ---
+
+  function showSaveLink(jobId) {
+    const url = absoluteJobUrl(jobId);
+    els.saveLinkUrl.textContent = url;
+    els.saveLinkUrl.href = url;
+    els.saveLink.classList.remove("hidden");
+
+    // Copy button
+    els.saveLinkCopy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        els.saveLinkCopy.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Copied`;
+        setTimeout(() => {
+          els.saveLinkCopy.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg> Copy link`;
+        }, 2000);
+      } catch {
+        showToast("Copy failed");
+      }
+    };
+
+    // Close button
+    els.saveLinkClose.onclick = () => {
+      els.saveLink.classList.add("hidden");
+    };
   }
 
   // --- Recording ---
@@ -154,12 +370,24 @@
     resetRecordingUI();
   }
 
+  function updateRecordBtnState() {
+    const modelSelected = els.modelSelect && els.modelSelect.value !== "";
+    if (modelSelected) {
+      els.recordBtn.disabled = false;
+      els.recordHint.textContent = "Tap to start recording";
+    } else {
+      els.recordBtn.disabled = true;
+      els.recordHint.textContent = "Select a model to start recording";
+    }
+  }
+
   function resetRecordingUI() {
     els.recordBtn.classList.remove("recording");
     clearInterval(timerInterval);
     els.timer.classList.add("hidden");
     els.timer.textContent = "00:00.0";
-    els.recordHint.textContent = "Tap to start recording";
+    els.recordBtn.disabled = !(els.modelSelect && els.modelSelect.value !== "");
+    els.recordHint.textContent = els.recordBtn.disabled ? "Select a model to start recording" : "Tap to start recording";
   }
 
   function updateTimer() {
@@ -227,7 +455,40 @@
   const MAX_CHUNK_RETRIES = 3;
   const RETRY_BASE_DELAY_MS = 1000;
 
+  function getSelectedModel() {
+    return els.modelSelect ? els.modelSelect.value : "";
+  }
+
+  function clearModelError() {
+    if (els.modelError) {
+      els.modelError.classList.add("hidden");
+    }
+    if (els.modelSelect) {
+      els.modelSelect.classList.remove("input-error");
+    }
+  }
+
+  function validateModelChosen() {
+    clearModelError();
+    const model = getSelectedModel();
+    if (!model) {
+      if (els.modelError) {
+        els.modelError.classList.remove("hidden");
+      }
+      if (els.modelSelect) {
+        els.modelSelect.classList.add("input-error");
+        els.modelSelect.focus();
+        els.modelSelect.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      return false;
+    }
+    return true;
+  }
+
   function uploadFile(file) {
+    if (!validateModelChosen()) {
+      return;
+    }
     els.transcribeFileBtn.disabled = true;
     els.recordBtn.disabled = true;
 
@@ -237,10 +498,65 @@
     return chunkedUpload(file);
   }
 
+  // Shared polling after job creation (used by both directUpload and chunkedUpload)
+  function pollForJobCompletion(jobId) {
+    currentJobId = jobId;
+    const url = setJobUrl(jobId);
+    showSaveLink(jobId);
+
+    showStatus("Transcribing... This may take several minutes for long files.");
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const pollStart = Date.now();
+
+    function poll() {
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        showToast("Transcription timed out after 30 minutes. Your link is saved — refresh to check later.");
+        resetUploadUI();
+        return;
+      }
+
+      fetch(`/api/transcribe/status/${jobId}`)
+        .then((r) => {
+          if (!r.ok) throw new Error("Status check failed: " + r.statusText);
+          return r.json();
+        })
+        .then((status) => {
+          if (status.status === "completed") {
+            showResult(status.result);
+            showSaveLink(jobId);
+            resetUploadUI();
+          } else if (status.status === "failed") {
+            showToast(`Transcription failed: ${status.error || "unknown error"}`);
+            resetUploadUI();
+          } else {
+            // processing — update progress
+            const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
+            let progressMsg;
+            if (status.progress_note === "working") {
+              progressMsg = `Transcribing... ${elapsed}s elapsed (working, progress unknown)`;
+            } else {
+              const pct = Math.round((status.progress || 0) * 100);
+              progressMsg = `Transcribing... ${elapsed}s elapsed (${pct}%)`;
+            }
+            showStatus(progressMsg);
+            setTimeout(poll, POLL_INTERVAL_MS);
+          }
+        })
+        .catch((err) => {
+          console.warn("status poll error:", err);
+          setTimeout(poll, POLL_INTERVAL_MS); // retry on network blip
+        });
+    }
+
+    setTimeout(poll, POLL_INTERVAL_MS);
+  }
+
   function directUpload(file) {
     const form = new FormData();
     form.append("file", file);
     if (els.language.value) form.append("language", els.language.value);
+    form.append("model", getSelectedModel());
 
     showStatus("Uploading: 0%...");
 
@@ -281,20 +597,28 @@
       };
 
       xhr.upload.onloadend = () => {
-        showStatus("Transcribing... This may take a moment.");
+        // Server now returns {job_id, status, progress} instead of full result.
+        // We'll start polling in the .then() handler.
       };
 
       xhr.open("POST", "/api/transcribe");
       xhr.send(form);
     })
     .then((data) => {
-      showResult(data);
+      if (data.job_id) {
+        pollForJobCompletion(data.job_id);
+      } else if (data.text !== undefined) {
+        // Legacy response (should not happen with new server, but handle gracefully)
+        showResult(data);
+        resetUploadUI();
+      } else {
+        showToast("Unexpected server response");
+        resetUploadUI();
+      }
     })
     .catch((err) => {
       showToast(err.message);
       hideStatus();
-    })
-    .finally(() => {
       resetUploadUI();
     });
   }
@@ -376,12 +700,16 @@
     const finishForm = new FormData();
     if (els.language.value) finishForm.append("language", els.language.value);
 
-    const langParam = els.language.value ? `?language=${encodeURIComponent(els.language.value)}` : "";
+    const model = getSelectedModel();
+    const queryParts = [];
+    if (els.language.value) queryParts.push(`language=${encodeURIComponent(els.language.value)}`);
+    if (model) queryParts.push(`model=${encodeURIComponent(model)}`);
+    const queryStr = queryParts.length ? "?" + queryParts.join("&") : "";
 
     let jobId;
     try {
       showStatus("Finalising upload...");
-      const res = await fetch(`/api/upload/finish/${uploadId}${langParam}`, { method: "POST" });
+      const res = await fetch(`/api/upload/finish/${uploadId}${queryStr}`, { method: "POST" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(errorMessage(err, `Finalise failed: ${res.statusText}`));
@@ -395,52 +723,14 @@
       return;
     }
 
-    // Poll for completion
-    showStatus("Transcribing... This may take several minutes for long files.");
-    const POLL_INTERVAL_MS = 2000;
-    const POLL_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-    const pollStart = Date.now();
-
-    while (true) {
-      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
-        showToast("Transcription timed out after 30 minutes. The server may still finish — refresh and try again later.");
-        resetUploadUI();
-        return;
-      }
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-      let status;
-      try {
-        const r = await fetch(`/api/transcribe/status/${jobId}`);
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          throw new Error(errorMessage(err, `Status check failed: ${r.statusText}`));
-        }
-        status = await r.json();
-      } catch (err) {
-        // network blip — keep polling up to POLL_TIMEOUT_MS
-        console.warn("status poll error:", err);
-        continue;
-      }
-      if (status.status === "completed") {
-        showResult(status.result);
-        break;
-      }
-      if (status.status === "failed") {
-        showToast(`Transcription failed: ${status.error || "unknown error"}`);
-        break;
-      }
-      // status === "processing" — update UI
-      const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
-      const pct = Math.round((status.progress || 0) * 100);
-      showStatus(`Transcribing... ${elapsed}s elapsed (${pct}%)`);
-    }
-
+    // Start polling with bookmarkable link
+    pollForJobCompletion(jobId);
     resetUploadUI();
   }
 
   function resetUploadUI() {
     els.transcribeFileBtn.disabled = false;
-    els.recordBtn.disabled = false;
+    els.recordBtn.disabled = !(els.modelSelect && els.modelSelect.value !== "");
     resetFileInput();
     hideStatus();
   }
@@ -468,12 +758,47 @@
       els.segmentsWrapper.classList.add("hidden");
     }
 
+    // Hide the "Start new transcription" button by default;
+    // showResumeResult will re-enable it for resume flows.
+    if (els.resultNewBtn) {
+      els.resultNewBtn.classList.add("hidden");
+    }
+
     els.result.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
+  // --- Start new transcription (navigate to / with clean slate) ---
+
+  function startNewTranscription() {
+    clearModelError();
+    if (pollTimer) clearInterval(pollTimer);
+    window.location.href = "/";
   }
 
   // --- Actions ---
 
   function setupActions() {
+    // Model select: clear inline error on change; control record button state
+    if (els.modelSelect) {
+      els.modelSelect.addEventListener("change", function () {
+        clearModelError();
+        updateRecordBtnState();
+      });
+      // Set initial record button state
+      updateRecordBtnState();
+    }
+
+    // "Start new transcription" buttons
+    if (els.headerNewBtn) {
+      els.headerNewBtn.addEventListener("click", startNewTranscription);
+    }
+    if (els.resumeHomeBtn) {
+      els.resumeHomeBtn.addEventListener("click", startNewTranscription);
+    }
+    if (els.resultNewBtn) {
+      els.resultNewBtn.addEventListener("click", startNewTranscription);
+    }
+
     els.copyBtn.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(els.resultText.textContent);

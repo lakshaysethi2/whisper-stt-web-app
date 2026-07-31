@@ -18,7 +18,13 @@
       <div class="logo-icon">⚡</div>
       <h1>Whisper STT</h1>
     </div>
-    <span class="model-badge" id="model-badge">...</span>
+    <div class="header-right">
+      <button class="btn btn-outline btn-sm header-new-btn" id="header-new-btn">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+        New transcription
+      </button>
+      <span class="model-badge" id="model-badge">...</span>
+    </div>
   </header>
 
   <main>
@@ -30,7 +36,7 @@
       </div>
       <div class="record-area">
         <div class="record-ring">
-          <button class="record-btn" id="record-btn" aria-label="Toggle recording">
+          <button class="record-btn" id="record-btn" aria-label="Toggle recording" disabled>
             <svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
               <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
@@ -40,8 +46,26 @@
         </div>
         <div class="timer-row">
           <span class="timer hidden" id="timer">00:00.0</span>
-          <span class="record-hint" id="record-hint">Tap to start recording</span>
+          <span class="record-hint" id="record-hint">Select a model to start recording</span>
         </div>
+      </div>
+    </div>
+
+    <!-- Model Choice Card (unmissable — must appear before upload/transcribe) -->
+    <div class="card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        Model <span class="required-star">*</span>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="model-select">Choose a model</label>
+        <select id="model-select" required>
+          <option value="">-- Choose a model --</option>
+          <option value="base">base — faster, lighter on CPU/RAM, good for drafts/short audio; lower quality</option>
+          <option value="large-v3-turbo">large-v3-turbo — much better quality; slower, heavier; long files take longer</option>
+        </select>
+        <p class="model-error hidden" id="model-error">Please select a model before transcribing.</p>
+        <p class="form-hint" id="device-hint"></p>
       </div>
     </div>
 
@@ -108,6 +132,42 @@
       </div>
     </div>
 
+    <!-- Save this link (shown after job creation) -->
+    <div class="card save-link-card hidden" id="save-link">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        Save this link
+      </div>
+      <div class="save-link-body">
+        <p class="save-link-desc">Bookmark this link to resume or view the result later:</p>
+        <div class="save-link-url-row">
+          <a class="save-link-url" id="save-link-url" target="_blank" rel="noopener"></a>
+          <button class="btn btn-outline btn-sm save-link-copy" id="save-link-copy">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+            Copy link
+          </button>
+          <button class="btn btn-outline btn-sm save-link-close" id="save-link-close">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Resume view (shown when loading a job from URL) -->
+    <div class="card resume-view hidden" id="resume-view">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span id="resume-title">Transcription Job</span>
+      </div>
+      <div id="resume-status"></div>
+      <div class="resume-error hidden" id="resume-error"></div>
+      <button class="btn btn-primary resume-home-btn" id="resume-home-btn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        Start new transcription
+      </button>
+    </div>
+
     <!-- Status -->
     <div class="status-bar hidden" id="status"></div>
 
@@ -123,6 +183,10 @@
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             Save
           </button>
+          <button class="btn btn-primary btn-sm result-new-btn" id="result-new-btn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+            Start new transcription
+          </button>
         </div>
         <div class="result-meta">
           <span class="badge" id="result-lang"></span>
@@ -133,6 +197,27 @@
       <div class="segments-list hidden" id="segments-wrapper">
         <div class="segments-title">Segments</div>
         <div id="segments"></div>
+      </div>
+    </div>
+
+    <!-- Browser STT Links -->
+    <div class="card browser-stt-card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        Transcribe in your browser (other sites)
+      </div>
+      <div class="browser-stt-body">
+        <p class="browser-stt-note">These run entirely on <strong>your device</strong>, not this server. Large files may struggle on phones.</p>
+        <div class="browser-stt-links">
+          <a class="btn btn-outline btn-sm" href="https://huggingface.co/spaces/Xenova/whisper-web" target="_blank" rel="noopener">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            Xenova/whisper-web
+          </a>
+          <a class="btn btn-outline btn-sm" href="https://huggingface.co/spaces/Xenova/whisper-webgpu" target="_blank" rel="noopener">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            Xenova/whisper-webgpu
+          </a>
+        </div>
       </div>
     </div>
   </main>
