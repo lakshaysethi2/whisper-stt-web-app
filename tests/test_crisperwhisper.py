@@ -7,7 +7,9 @@ result -> app result shape conversion.
 
 import asyncio
 import math
+import os
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -400,3 +402,80 @@ def test_load_model_routes_crisper_models():
         assert mock_exec.submit.called
         # crisper load does not touch the faster-whisper cache
         assert transcriber._crisper_models == {}
+
+
+# --- CrisperWhisper container audio pre-decode (ffmpeg) ---
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def test_prepare_crisper_audio_wav_passthrough(tmp_path):
+    """WAV inputs are not re-encoded; no temp file is created."""
+    from app.transcriber import _prepare_crisper_audio
+
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"RIFF....")  # content unused for passthrough path
+    path, temp = _prepare_crisper_audio(str(wav))
+    assert path == str(wav)
+    assert temp is None
+
+
+def test_prepare_crisper_audio_mp4_via_ffmpeg():
+    """MP4 (and other containers) are decoded to a 16 kHz mono WAV via ffmpeg.
+
+    Regression for soundfile 'Format not recognised' when CrisperWhisper loads
+    container uploads without librosa installed.
+    """
+    import wave
+
+    from app.transcriber import _prepare_crisper_audio
+
+    mp4 = FIXTURES / "tone.mp4"
+    assert mp4.is_file(), f"missing fixture {mp4}"
+
+    path, temp = _prepare_crisper_audio(str(mp4))
+    try:
+        assert temp is not None
+        assert path == temp
+        assert path.endswith(".wav")
+        assert os.path.isfile(path)
+        with wave.open(path, "rb") as wf:
+            assert wf.getnchannels() == 1
+            assert wf.getframerate() == 16000
+            assert wf.getnframes() > 0
+    finally:
+        if temp:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+
+
+def test_transcribe_crisper_sync_prepares_mp4(tmp_path):
+    """_transcribe_crisper_sync runs ffmpeg pre-decode before model.transcribe
+    when given a non-WAV path, and cleans up the temp WAV."""
+    from app import transcriber
+
+    mp4 = FIXTURES / "tone.mp4"
+    assert mp4.is_file()
+
+    seen_paths: list[str] = []
+
+    def _fake_transcribe(audio, **kwargs):
+        seen_paths.append(audio)
+        assert audio.endswith(".wav")
+        assert os.path.isfile(audio)
+        return _fake_crisper_result()
+
+    fake_model = SimpleNamespace(transcribe=_fake_transcribe)
+    with patch.dict(transcriber._crisper_models, {"crisperwhisper-small": fake_model}), \
+         patch.object(transcriber, "_resolved_crisper_backend", "transformers"), \
+         patch.object(transcriber, "_device_info", {"device": "cpu"}):
+        result = transcriber._transcribe_crisper_sync(
+            str(mp4), "en", "job-mp4", "crisperwhisper-small", "verbatim"
+        )
+
+    assert result["text"] == "hello [um] world"
+    assert len(seen_paths) == 1
+    # temp WAV cleaned up after return
+    assert not os.path.exists(seen_paths[0])

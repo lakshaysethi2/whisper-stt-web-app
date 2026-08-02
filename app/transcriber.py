@@ -1,13 +1,24 @@
 import asyncio
 import logging
+import os
+import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 
 from app.config import WHISPER_MODEL, CRISPER_MODEL_IDS, CRISPER_BACKEND, is_crisper_model
 
 logger = logging.getLogger(__name__)
+
+# CrisperWhisper's load_audio uses soundfile first and only falls back to
+# librosa if installed. soundfile cannot read MP4/M4A/MOV containers, and we
+# deliberately avoid pulling librosa/numba. Pre-decode with ffmpeg (already in
+# the image) to 16 kHz mono WAV — the format Whisper models expect.
+_CRISPER_WAV_SUFFIXES = {".wav"}
+_CRISPER_SAMPLE_RATE = 16000
 
 # Multi-model cache: model_name -> (WhisperModel, BatchedInferencePipeline)
 _models: dict[str, tuple[WhisperModel, BatchedInferencePipeline]] = {}
@@ -199,6 +210,70 @@ def load_crisper_model(model_name: str) -> None:
     _crisper_executor.submit(_load_crisper_model_sync, model_name).result()
 
 
+def _prepare_crisper_audio(audio_path: str) -> tuple[str, str | None]:
+    """Ensure audio is a WAV CrisperWhisper/soundfile can decode.
+
+    Returns (path_to_use, temp_path_to_delete_or_None).
+    WAV inputs are passed through unchanged. Other containers (mp4, m4a, mov,
+    webm, …) are decoded via ffmpeg to 16 kHz mono PCM WAV in a temp file.
+    """
+    suffix = Path(audio_path).suffix.lower()
+    if suffix in _CRISPER_WAV_SUFFIXES:
+        return audio_path, None
+
+    fd, wav_path = tempfile.mkstemp(prefix="crisper_", suffix=".wav")
+    os.close(fd)
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", audio_path,
+        "-ac", "1",
+        "-ar", str(_CRISPER_SAMPLE_RATE),
+        "-c:a", "pcm_s16le",
+        wav_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            "ffmpeg is required to decode non-WAV audio for CrisperWhisper"
+        ) from e
+    except subprocess.TimeoutExpired:
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"ffmpeg timed out decoding {audio_path} for CrisperWhisper"
+        ) from None
+
+    if result.returncode != 0 or not os.path.isfile(wav_path) or os.path.getsize(wav_path) == 0:
+        err = (result.stderr or result.stdout or "").strip()
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"ffmpeg failed to decode {audio_path} for CrisperWhisper"
+            + (f": {err[-500:]}" if err else "")
+        )
+
+    logger.info(
+        "CrisperWhisper: pre-decoded %s -> 16kHz mono WAV via ffmpeg",
+        Path(audio_path).name,
+    )
+    return wav_path, wav_path
+
+
 def _crisper_words_to_segments(words: list[dict]) -> list[dict]:
     """Group word-level timestamps into segment-sized chunks the existing UI
     already renders (text/t0/t1), keeping the per-word data inside."""
@@ -242,51 +317,59 @@ def _transcribe_crisper_sync(
         else "int8_float16" if backend == "ct2" else "float32"
     )
 
-    start = time.monotonic()
-    cw = model.transcribe(
-        audio_path,
-        language=language or "en",
-        mode=mode,
-        word_timestamps=True,
-    )
-    elapsed = time.monotonic() - start
+    decode_path, temp_wav = _prepare_crisper_audio(audio_path)
+    try:
+        start = time.monotonic()
+        cw = model.transcribe(
+            decode_path,
+            language=language or "en",
+            mode=mode,
+            word_timestamps=True,
+        )
+        elapsed = time.monotonic() - start
 
-    logger.info(
-        "CrisperWhisper transcription done in %.2fs device=%s model=%s mode=%s",
-        elapsed, device, model_name, mode,
-    )
+        logger.info(
+            "CrisperWhisper transcription done in %.2fs device=%s model=%s mode=%s",
+            elapsed, device, model_name, mode,
+        )
 
-    words: list[dict] = []
-    for w in (getattr(cw, "words", None) or []):
-        if w.start is None or w.end is None:
-            continue
-        words.append({
-            "word": w.word,
-            "t0": int(round(float(w.start) * 1000)),
-            "t1": int(round(float(w.end) * 1000)),
-        })
+        words: list[dict] = []
+        for w in (getattr(cw, "words", None) or []):
+            if w.start is None or w.end is None:
+                continue
+            words.append({
+                "word": w.word,
+                "t0": int(round(float(w.start) * 1000)),
+                "t1": int(round(float(w.end) * 1000)),
+            })
 
-    duration = float(getattr(cw, "duration", 0.0) or 0.0)
-    process_time = float(getattr(cw, "processing_time", 0.0) or 0.0)
-    if process_time <= 0:
-        process_time = elapsed
-    result = {
-        "id": job_id,
-        "text": (getattr(cw, "text", "") or "").strip(),
-        "language": getattr(cw, "language", None) or "en",
-        "mode": mode,
-        "model": model_name,
-        "backend": backend,
-        "device": device,
-        "compute_type": compute_type,
-        "segments": _crisper_words_to_segments(words),
-        "words": words,
-        "duration": duration,
-        "process_time": round(process_time, 2),
-    }
-    if duration > 0 and process_time > 0:
-        result["realtime_factor"] = round(duration / process_time, 1)
-    return result
+        duration = float(getattr(cw, "duration", 0.0) or 0.0)
+        process_time = float(getattr(cw, "processing_time", 0.0) or 0.0)
+        if process_time <= 0:
+            process_time = elapsed
+        result = {
+            "id": job_id,
+            "text": (getattr(cw, "text", "") or "").strip(),
+            "language": getattr(cw, "language", None) or "en",
+            "mode": mode,
+            "model": model_name,
+            "backend": backend,
+            "device": device,
+            "compute_type": compute_type,
+            "segments": _crisper_words_to_segments(words),
+            "words": words,
+            "duration": duration,
+            "process_time": round(process_time, 2),
+        }
+        if duration > 0 and process_time > 0:
+            result["realtime_factor"] = round(duration / process_time, 1)
+        return result
+    finally:
+        if temp_wav:
+            try:
+                os.unlink(temp_wav)
+            except OSError:
+                pass
 
 
 def load_model(model_name: str | None = None) -> None:
