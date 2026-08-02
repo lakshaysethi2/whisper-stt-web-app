@@ -21,7 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install CPU-only torch first so pip does not pull the CUDA wheel bundle
+# (nvidia-*) into a CPU-only image when resolving crisperwhisper[transformers].
+# The GPU Dockerfile intentionally omits this step (CUDA torch comes from PyPI).
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
 COPY static/ static/

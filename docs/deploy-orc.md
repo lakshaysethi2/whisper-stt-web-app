@@ -50,6 +50,10 @@ docker compose logs -f
 | `small` | ~1.2 GB | ~500 MB | Better accuracy, more RAM |
 | `medium` | ~3.2 GB | ~1.5 GB | High accuracy |
 | `large-v3-turbo` | ~3.4 GB | ~1.7 GB | Best accuracy, heavy |
+| `crisperwhisper-small` | ~1 GB (fp32) | ~0.5 GB | Verbatim ASR + word timestamps; lightest CrisperWhisper |
+| `crisperwhisper-medium` | ~3 GB (fp32) | ~1.5 GB | Verbatim ASR; near-large quality |
+| `crisperwhisper-turbo` | ~3.2 GB (fp32) | ~1.6 GB | Verbatim ASR; fast large option |
+| `crisperwhisper-large` | ~6.2 GB (fp32) | ~3.1 GB | Verbatim ASR; best quality, heavy |
 
 **Default is `base`** — best tradeoff for CPU inference on this host.
 
@@ -57,6 +61,17 @@ To switch:
 ```bash
 WHISPER_MODEL=small docker compose up -d
 ```
+
+### CrisperWhisper 2.0 on ARM (this host)
+
+This host is ARM64, so CrisperWhisper runs on the **pure-PyTorch (`transformers`) backend**:
+
+- The `[ct2]` extra is not installable on ARM64 (its wheels are Linux x86_64 only) and would conflict with faster-whisper anyway (upstream `ctranslate2` overwrites the fork's files).
+- The app installs `crisperwhisper[transformers]`; `CRISPER_BACKEND=auto` (default) resolves to `transformers` automatically.
+- The transformers backend loads with fp32 on CPU and uses eager attention for word timings — expect roughly realtime-factor 0.4 on `crisperwhisper-small` (measured on this A1), slower on larger models. CrisperWhisper jobs show "working, progress unknown" because the library exposes no incremental progress.
+- The `Dockerfile.cpu` installs CPU-only `torch` first (from the PyTorch CPU index) so the `nvidia-*` CUDA wheel bundle is not pulled into the image; expect the image to grow by ~1.5-2 GB for torch + transformers + crisperwhisper.
+- Model downloads land in the `hf-cache` volume (`/cache`). Watch disk: each CrisperWhisper model is 0.5-3.1 GB on disk.
+- **UI/API**: choose a `crisperwhisper-*` model in the UI; a "Transcription style" selector appears (verbatim default, or `intended`). The API also accepts `mode=verbatim|intended` per job. Faster-whisper models ignore the mode.
 
 ## Disk management
 

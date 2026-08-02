@@ -30,6 +30,8 @@
     downloadBtn: $("#download-btn"),
     modelBadge: $("#model-badge"),
     modelSelect: $("#model-select"),
+    modeSelect: $("#mode-select"),
+    modeGroup: $("#mode-group"),
     deviceHint: $("#device-hint"),
     saveLink: $("#save-link"),
     saveLinkUrl: $("#save-link-url"),
@@ -459,6 +461,27 @@
     return els.modelSelect ? els.modelSelect.value : "";
   }
 
+  function isCrisperModel(model) {
+    return /^crisperwhisper-/.test(model || "");
+  }
+
+  function getSelectedMode() {
+    // Only meaningful for CrisperWhisper models; verbatim is the default.
+    if (els.modeSelect && isCrisperModel(getSelectedModel())) {
+      return els.modeSelect.value || "verbatim";
+    }
+    return "";
+  }
+
+  function updateModeGroupVisibility() {
+    if (!els.modeGroup || !els.modeSelect) return;
+    const show = isCrisperModel(getSelectedModel());
+    els.modeGroup.classList.toggle("hidden", !show);
+    if (show && !els.modeSelect.value) {
+      els.modeSelect.value = "verbatim";
+    }
+  }
+
   function clearModelError() {
     if (els.modelError) {
       els.modelError.classList.add("hidden");
@@ -557,6 +580,8 @@
     form.append("file", file);
     if (els.language.value) form.append("language", els.language.value);
     form.append("model", getSelectedModel());
+    const mode = getSelectedMode();
+    if (mode) form.append("mode", mode);
 
     showStatus("Uploading: 0%...");
 
@@ -701,9 +726,11 @@
     if (els.language.value) finishForm.append("language", els.language.value);
 
     const model = getSelectedModel();
+    const mode = getSelectedMode();
     const queryParts = [];
     if (els.language.value) queryParts.push(`language=${encodeURIComponent(els.language.value)}`);
     if (model) queryParts.push(`model=${encodeURIComponent(model)}`);
+    if (mode) queryParts.push(`mode=${encodeURIComponent(mode)}`);
     const queryStr = queryParts.length ? "?" + queryParts.join("&") : "";
 
     let jobId;
@@ -782,10 +809,12 @@
     if (els.modelSelect) {
       els.modelSelect.addEventListener("change", function () {
         clearModelError();
+        updateModeGroupVisibility();
         updateRecordBtnState();
       });
       // Set initial record button state
       updateRecordBtnState();
+      updateModeGroupVisibility();
     }
 
     // "Start new transcription" buttons

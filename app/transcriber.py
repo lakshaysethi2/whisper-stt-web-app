@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 
-from app.config import WHISPER_MODEL
+from app.config import WHISPER_MODEL, CRISPER_MODEL_IDS, CRISPER_BACKEND, is_crisper_model
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,25 @@ _device_info = {}
 # Shared progress dict for real-time transcription progress tracking.
 # Keyed by job_id, value is progress float (0.0 to 1.0) or None when unknown.
 _progress: dict[str, float | None] = {}
+
+# --- CrisperWhisper 2.0 backend (verbatim ASR with word-level timestamps) ---
+# crisperwhisper is imported lazily so the app still boots (and faster-whisper
+# keeps working) if the extra is not installed.
+CrisperWhisperModel = None
+_crisper_import_error: Exception | None = None
+try:
+    from crisperwhisper import CrisperWhisperModel  # noqa: E402
+except Exception as e:  # pragma: no cover - only on minimal installs
+    _crisper_import_error = e
+    logger.warning("crisperwhisper not importable; CrisperWhisper models unavailable: %s", e)
+
+# Upstream serving note: load AND run CrisperWhisper models on one dedicated
+# thread (the ct2 recovery primitives are affine to the creating thread; this
+# also serializes inference).
+_crisper_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="crisperwhisper")
+# app model name -> CrisperWhisperModel instance
+_crisper_models: dict[str, object] = {}
+_resolved_crisper_backend: str | None = None
 
 
 def _get_gpu_info() -> dict:
@@ -97,7 +117,176 @@ def _detect_device() -> tuple[str, str, int]:
 
 def get_loaded_models() -> list[str]:
     """Return list of currently loaded model names."""
-    return list(_models.keys())
+    return list(_models.keys()) + list(_crisper_models.keys())
+
+
+def get_crisper_backend_info() -> dict:
+    """Report the configured and actually-resolved CrisperWhisper backend."""
+    return {"configured": CRISPER_BACKEND, "resolved": _resolved_crisper_backend}
+
+
+def _ct2_fork_installed() -> bool:
+    """True when the ctranslate2-crisperwhisper fork (not upstream ctranslate2)
+    is the installed CTranslate2. faster-whisper ships upstream ctranslate2,
+    which conflicts with the fork, so 'auto' must not blindly prefer ct2."""
+    try:
+        import importlib.metadata
+        importlib.metadata.distribution("ctranslate2-crisperwhisper")
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        return False
+
+
+def _resolve_crisper_backend_choice() -> str:
+    """Map CRISPER_BACKEND to the concrete backend the library must use.
+
+    'auto' prefers the ct2 fork when it is actually installed, otherwise
+    transformers. We never pass 'auto' straight through: the library's own
+    auto-resolution picks ct2 whenever any ctranslate2 (including upstream,
+    pulled in by faster-whisper) is importable, which would load a broken
+    combo here.
+    """
+    choice = CRISPER_BACKEND
+    if choice not in ("auto", "ct2", "transformers"):
+        logger.warning("Unknown CRISPER_BACKEND %r; using 'auto'", choice)
+        choice = "auto"
+    if choice == "auto":
+        return "ct2" if _ct2_fork_installed() else "transformers"
+    return choice
+
+
+def _load_crisper_model_sync(model_name: str) -> None:
+    """Load a CrisperWhisper model. Runs on the dedicated crisper thread so
+    the model is created and later used on the same thread (upstream serving
+    requirement for the ct2 recovery primitives)."""
+    global _resolved_crisper_backend
+    if model_name in _crisper_models:
+        return
+    if CrisperWhisperModel is None:
+        raise RuntimeError(
+            "crisperwhisper is not installed; install it with "
+            "`pip install 'crisperwhisper[transformers]'` (CPU) or "
+            "`pip install 'crisperwhisper[ct2]'` (Linux x86_64 GPU)"
+            + (f" (import error: {_crisper_import_error})" if _crisper_import_error else "")
+        )
+    hf_id = CRISPER_MODEL_IDS[model_name]
+    backend = _resolve_crisper_backend_choice()
+    device = _device_info.get("device", "cpu")
+    if device == "cuda":
+        device_arg, compute_type = "cuda", "float16"
+    else:
+        device_arg = "cpu"
+        # ct2 quantizes on CPU with int8_float16; the transformers engine maps
+        # float32/int8 to fp32 (best on CPU, no fp16 NEON accel assumed).
+        compute_type = "int8_float16" if backend == "ct2" else "float32"
+    logger.info(
+        "Loading CrisperWhisper %s (backend=%s, device=%s, compute_type=%s)...",
+        hf_id, backend, device_arg, compute_type,
+    )
+    model = CrisperWhisperModel(
+        hf_id,
+        backend=backend,
+        device=device_arg,
+        compute_type=compute_type,
+    )
+    _crisper_models[model_name] = model
+    _resolved_crisper_backend = getattr(model, "backend", backend)
+    logger.info("CrisperWhisper %s loaded (backend=%s).", hf_id, _resolved_crisper_backend)
+
+
+def load_crisper_model(model_name: str) -> None:
+    """Load a CrisperWhisper model on the dedicated crisper thread (blocking)."""
+    _crisper_executor.submit(_load_crisper_model_sync, model_name).result()
+
+
+def _crisper_words_to_segments(words: list[dict]) -> list[dict]:
+    """Group word-level timestamps into segment-sized chunks the existing UI
+    already renders (text/t0/t1), keeping the per-word data inside."""
+    segments: list[dict] = []
+    cur: list[dict] = []
+
+    def flush() -> None:
+        if not cur:
+            return
+        segments.append({
+            "text": " ".join(w["word"] for w in cur),
+            "t0": cur[0]["t0"],
+            "t1": cur[-1]["t1"],
+            "words": list(cur),  # copy: cur is cleared after append
+        })
+        cur.clear()
+
+    for w in words:
+        cur.append(w)
+        if len(cur) >= 10 or w["word"].rstrip().endswith((".", "!", "?", "…")):
+            flush()
+    flush()
+    return segments
+
+
+def _transcribe_crisper_sync(
+    audio_path: str,
+    language: str,
+    job_id: str,
+    model_name: str,
+    mode: str,
+) -> dict:
+    """CrisperWhisper transcription; runs on the dedicated crisper thread.
+    Returns the same transcript/segments/word-timestamps shape the app
+    returns for faster-whisper jobs (segments get an extra per-word list)."""
+    model = _crisper_models[model_name]
+    backend = _resolved_crisper_backend or _resolve_crisper_backend_choice()
+    device = _device_info.get("device", "cpu")
+    compute_type = (
+        "float16" if device == "cuda"
+        else "int8_float16" if backend == "ct2" else "float32"
+    )
+
+    start = time.monotonic()
+    cw = model.transcribe(
+        audio_path,
+        language=language or "en",
+        mode=mode,
+        word_timestamps=True,
+    )
+    elapsed = time.monotonic() - start
+
+    logger.info(
+        "CrisperWhisper transcription done in %.2fs device=%s model=%s mode=%s",
+        elapsed, device, model_name, mode,
+    )
+
+    words: list[dict] = []
+    for w in (getattr(cw, "words", None) or []):
+        if w.start is None or w.end is None:
+            continue
+        words.append({
+            "word": w.word,
+            "t0": int(round(float(w.start) * 1000)),
+            "t1": int(round(float(w.end) * 1000)),
+        })
+
+    duration = float(getattr(cw, "duration", 0.0) or 0.0)
+    process_time = float(getattr(cw, "processing_time", 0.0) or 0.0)
+    if process_time <= 0:
+        process_time = elapsed
+    result = {
+        "id": job_id,
+        "text": (getattr(cw, "text", "") or "").strip(),
+        "language": getattr(cw, "language", None) or "en",
+        "mode": mode,
+        "model": model_name,
+        "backend": backend,
+        "device": device,
+        "compute_type": compute_type,
+        "segments": _crisper_words_to_segments(words),
+        "words": words,
+        "duration": duration,
+        "process_time": round(process_time, 2),
+    }
+    if duration > 0 and process_time > 0:
+        result["realtime_factor"] = round(duration / process_time, 1)
+    return result
 
 
 def load_model(model_name: str | None = None) -> None:
@@ -105,6 +294,14 @@ def load_model(model_name: str | None = None) -> None:
     global _device_info
 
     target = model_name or WHISPER_MODEL
+
+    if is_crisper_model(target):
+        if target not in _crisper_models:
+            if not _device_info:
+                device, compute_type, cc = _detect_device()
+                _device_info.update({"device": device, "compute_type": compute_type, "compute_capability": cc})
+            load_crisper_model(target)
+        return
 
     if target in _models:
         logger.info("Model %s already loaded", target)
@@ -157,11 +354,22 @@ def _transcribe_sync(
     language: str,
     job_id: str,
     model_name: str | None = None,
+    mode: str = "verbatim",
 ) -> dict:
     """Synchronous transcription function that runs entirely in a thread.
     Consumes the segment generator inside the thread so the asyncio event loop
     is never blocked. Updates real progress in _progress dict during iteration."""
     target = model_name or WHISPER_MODEL
+
+    if is_crisper_model(target):
+        if target not in _crisper_models:
+            load_model(target)
+        # Run on the dedicated crisper thread: the model was created there and
+        # the upstream ct2 recovery primitives are affine to that thread.
+        return _crisper_executor.submit(
+            _transcribe_crisper_sync, audio_path, language, job_id, target, mode
+        ).result()
+
     device = _device_info.get("device", "cpu")
 
     # Get or load the model
@@ -234,11 +442,19 @@ async def transcribe_audio(
     language: str = None,
     job_id: str = "unknown",
     model_name: str | None = None,
+    mode: str = "verbatim",
 ) -> dict:
     """Transcribe audio in a thread. Never blocks the asyncio event loop.
-    Optionally specify model_name to use a specific Whisper model.
+    Optionally specify model_name to use a specific Whisper model, and mode
+    (verbatim|intended) for CrisperWhisper models (ignored by faster-whisper).
     Returns the result dict once both inference and segment iteration complete."""
-    _progress[job_id] = 0.0
+    target = model_name or WHISPER_MODEL
+    if is_crisper_model(target):
+        # CrisperWhisper cannot report incremental audio-position progress;
+        # signal "working, progress unknown" instead of a stuck 0%.
+        _progress[job_id] = None
+    else:
+        _progress[job_id] = 0.0
     try:
         result = await asyncio.to_thread(
             _transcribe_sync,
@@ -246,6 +462,7 @@ async def transcribe_audio(
             language or "en",
             job_id,
             model_name,
+            mode,
         )
         _progress[job_id] = 1.0
         return result

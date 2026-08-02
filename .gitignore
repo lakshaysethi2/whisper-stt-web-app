@@ -11,6 +11,7 @@ node_modules/
 !test_audio/SOURCES.md
 docker-compose.override.yml
 .testvenv/
+.venv/
 
 # Cypress artifacts (NOT specs)
 cypress/screenshots/
