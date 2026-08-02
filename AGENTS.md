@@ -10,9 +10,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **Job IDs**: Full uuid4 hex (32 chars, 128 bits entropy) — generated via `uuid.uuid4().hex`. Used in `/api/transcribe`, `/api/upload/finish`, and as URL path `/j/{job_id}`.
 - **Job lifecycle**: Jobs are created with status "processing", then transition to "completed" or "failed". Status stored in-memory `_jobs` dict AND persisted to disk as `status.json` under `WORK_DIR/<job_id>/`.
 - **Split retention**: `JOB_RETENTION_SECONDS` (default 604800 = 1 week, captain requirement ≥1h) governs transcripts (`status.json`). `AUDIO_RETENTION_SECONDS` (default 1800 = 30min) governs recordings (`input*` files), which are also deleted immediately on completion/failure via `cleanup_job_audio` (keeps status.json). Running jobs are never cleaned up.
-- **Disk persistence**: `_persist_job()` writes `status.json` on completion/failure. `cleanup_job_audio` (in the transcription task's `finally`) keeps status.json — do NOT revert to `cleanup_job` there (it would delete the transcript). `_load_persisted_jobs()` reads them on startup for resume after restart.
+- **Disk persistence**: `_persist_job()` writes `status.json` at job CREATION (status "processing") AND on completion/failure. `cleanup_job_audio` (in the transcription task's `finally`) keeps status.json — do NOT revert to `cleanup_job` there (it would delete the transcript). On startup, `_load_persisted_jobs()` restores completed/failed jobs as-is and restores in-flight ("processing"/no-status) dirs as **"interrupted"** — the status endpoint reports those with `recording_retained` + re-upload guidance, never 404/expired.
 - **Startup cleanup**: `cleanup_all_jobs()` is retention-aware — it does NOT wipe WORK_DIR. It removes only job dirs older than `JOB_RETENTION_SECONDS` and input audio older than `AUDIO_RETENTION_SECONDS`; "chunks" is preserved. Job age comes from `status.json` `created_at` (see `job_created_at`).
-- **Expiry API**: `GET /api/transcribe/status/{job_id}` returns additive `retention_seconds`, `expires_at` (epoch), `expires_in_seconds`. `GET /api/upload/config` returns `job_retention_seconds`/`audio_retention_seconds`; the frontend uses them for honest expiry messages (save-link note + resume-expired view).
+- **Expiry API**: `GET /api/transcribe/status/{job_id}` returns additive `retention_seconds`, `expires_at` (epoch), `expires_in_seconds`; statuses include "interrupted" (dir exists, transcription never finished — has `recording_retained` + re-upload error; the endpoint falls back to disk when the job is not in memory). `GET /api/upload/config` returns `job_retention_seconds`/`audio_retention_seconds`; the frontend uses them for honest expiry messages (save-link note + resume-expired/interrupted views).
 - **tmpfs caveat**: whisper-test runs `WORK_DIR=/tmp/whisper-stt` on a 2GB tmpfs — transcripts still vanish on container restart there (documented in README/docs; moving WORK_DIR to real disk is a deploy decision).
 - **Progress tracking**: `app/transcriber.py` exposes `_progress: dict[str, float]` and `get_progress(job_id)`. Progress = `seg.end / info.duration` (audio position processed). Entire segment iteration runs in `to_thread` to avoid blocking the event loop.
 - **SPA route**: `GET /j/{job_id}` serves `static/index.html` — the frontend reads `job_id` from `window.location.pathname` and resumes polling/display.
@@ -22,8 +22,9 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 ## Tests
 
 - Run via `python -m pytest tests/ -v` (uses uv venv at `.venv/`)
-- Key test files: `tests/test_chunked_upload.py`, `tests/test_retention.py` (split retention + startup cleanup + expiry API)
+- Key test files: `tests/test_chunked_upload.py`, `tests/test_retention.py` (split retention + startup cleanup + expiry API + interrupted-restart restore)
 - `tests/conftest.py` redirects `WORK_DIR` to a temp dir so tests never touch a real deployment's `/tmp/whisper-stt`
+- Note: TestClient (anyio) cancels handler-spawned background tasks at request end — a harness artifact, NOT production behavior (uvicorn keeps them alive). Tests that need a live in-flight job build the on-disk state directly instead.
 - Tests mock `app.main.transcribe_audio` using `_make_async_mock` helper for fast/slow results
 - SPA route tests: `test_spa_job_route_serves_html`, `test_spa_job_route_any_job_id`
 - UUID entropy test: `test_job_id_has_full_uuid_entropy` (asserts 32-char hex)

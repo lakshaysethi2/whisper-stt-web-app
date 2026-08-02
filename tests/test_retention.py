@@ -30,6 +30,13 @@ def _make_async_mock(result_dict):
     return _mock
 
 
+def _make_slow_async_mock(result_dict, delay=10):
+    async def _mock(*args, **kwargs):
+        await _asyncio.sleep(delay)
+        return result_dict
+    return _mock
+
+
 def _make_job_dir(root: Path, job_id: str, created_at: float,
                   with_status: bool = True, with_input: bool = True) -> Path:
     d = root / job_id
@@ -277,3 +284,152 @@ def test_processing_status_also_reports_expiry():
         assert data["expires_at"] > time.time()
         assert data["retention_seconds"] == config.JOB_RETENTION_SECONDS
         _jobs.pop(job_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Interrupted jobs (restart/crash mid-run) — reported as 'interrupted', never 'expired'
+# ---------------------------------------------------------------------------
+
+
+SLOW_RESULT = {
+    "text": "interrupted", "language": "en",
+    "duration": 1.0, "process_time": 10.0,
+    "segments": [], "id": "x",
+    "device": "cpu", "compute_type": "int8",
+}
+
+
+def test_job_status_persisted_at_creation():
+    """status.json exists with 'processing' as soon as the job is created."""
+    with patch("app.main.transcribe_audio", side_effect=_make_slow_async_mock(SLOW_RESULT)):
+        resp = client.post(
+            "/api/transcribe",
+            files={"file": ("test.wav", b"X" * 1024, "audio/wav")},
+            data={"language": "en", "model": "base"},
+        )
+        assert resp.status_code == 200
+        job_id = resp.json()["job_id"]
+        sf = app_main.WORK_DIR / job_id / "status.json"
+        assert sf.exists(), "status.json must be persisted at job creation"
+        data = json.loads(sf.read_text())
+        assert data["status"] == "processing"
+        assert data["created_at"] > 0
+        _jobs.pop(job_id, None)
+
+
+def test_upload_finish_persists_processing_at_creation():
+    """Chunked uploads also persist status.json at job creation."""
+    with patch("app.main.CHUNK_SIZE", 10), patch("app.main.MAX_CHUNKS", 100):
+        upload_id = None
+        try:
+            resp = client.post(
+                "/api/upload/start",
+                data={"filename": "test.wav", "size": 10, "total_chunks": 1},
+            )
+            upload_id = resp.json()["upload_id"]
+            client.post(
+                f"/api/upload/chunk/{upload_id}",
+                data={"chunk_index": 0},
+                files={"file": ("test.wav.part0", b"X" * 10, "audio/wav")},
+            )
+            with patch("app.main.transcribe_audio", side_effect=_make_slow_async_mock(SLOW_RESULT)):
+                resp = client.post(f"/api/upload/finish/{upload_id}", params={"model": "base"}, data={}, timeout=2.0)
+                assert resp.status_code == 200
+                job_id = resp.json()["job_id"]
+            sf = app_main.WORK_DIR / job_id / "status.json"
+            assert sf.exists(), "status.json must be persisted at job creation"
+            assert json.loads(sf.read_text())["status"] == "processing"
+            _jobs.pop(job_id, None)
+        finally:
+            if upload_id:
+                import shutil as _shutil
+                _shutil.rmtree(app_main.WORK_DIR / "chunks" / upload_id, ignore_errors=True)
+
+
+def test_interrupted_processing_job_reports_interrupted_after_restart(tmp_path):
+    """A job in flight when the process died (status.json 'processing' + recording
+    on disk) is restored as 'interrupted' with its recording retained — the status
+    endpoint must NOT 404/expire it.
+
+    State is built directly on disk because the TestClient harness cancels
+    handler-spawned background tasks at request end (a uvicorn artifact that does
+    not happen in production), which would delete the recording early.
+    """
+    job_id = "12" * 16
+    d = tmp_path / job_id
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "input.wav").write_bytes(b"X" * 1024)
+    (d / "status.json").write_text(json.dumps({
+        "status": "processing",
+        "created_at": time.time() - 60,
+    }))
+
+    # Simulate restart: run the startup sequence, then serve the status.
+    with patch.object(app_main, "WORK_DIR", tmp_path), patch.object(config, "WORK_DIR", tmp_path):
+        config.cleanup_all_jobs()
+        loaded = app_main._load_persisted_jobs()
+    assert job_id in loaded
+    assert loaded[job_id]["status"] == "interrupted"
+
+    with patch.object(app_main, "WORK_DIR", tmp_path):
+        _jobs[job_id] = loaded[job_id]
+        r = client.get(f"/api/transcribe/status/{job_id}")
+    assert r.status_code == 200, "interrupted job must not 404"
+    data = r.json()
+    assert data["status"] == "interrupted"
+    assert data["recording_retained"] is True
+    assert "re-upload" in data["error"].lower()
+    assert data["expires_at"] > time.time()
+    _jobs.pop(job_id, None)
+
+
+def test_job_dir_without_status_reports_interrupted(tmp_path):
+    """A job dir with a recording but no status.json (crash before persist) is
+    restored as 'interrupted', never dropped as expired."""
+    job_id = "ab" * 16
+    _make_job_dir(tmp_path, job_id, created_at=time.time(), with_status=False)
+    with patch.object(app_main, "WORK_DIR", tmp_path):
+        loaded = app_main._load_persisted_jobs()
+    assert job_id in loaded
+    assert loaded[job_id]["status"] == "interrupted"
+
+
+def test_status_endpoint_disk_fallback_reports_interrupted(tmp_path):
+    """Status check on a job not in memory but present on disk returns
+    200 'interrupted' (with recording_retained), not 404."""
+    job_id = "cd" * 16
+    _make_job_dir(tmp_path, job_id, created_at=time.time(), with_status=False)
+    with patch.object(app_main, "WORK_DIR", tmp_path):
+        r = client.get(f"/api/transcribe/status/{job_id}")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "interrupted"
+    assert data["recording_retained"] is True
+
+
+def test_interrupted_recording_retained_false_when_audio_gone(tmp_path):
+    """recording_retained is honest: false once the input was cleaned up."""
+    job_id = "ef" * 16
+    _make_job_dir(tmp_path, job_id, created_at=time.time(), with_status=False)
+    with patch.object(app_main, "WORK_DIR", tmp_path):
+        r = client.get(f"/api/transcribe/status/{job_id}")
+    assert r.status_code == 200
+    assert r.json()["status"] == "interrupted"
+    assert r.json()["recording_retained"] is True
+
+    (tmp_path / job_id / "input.wav").unlink()
+    with patch.object(app_main, "WORK_DIR", tmp_path):
+        r = client.get(f"/api/transcribe/status/{job_id}")
+    assert r.status_code == 200
+    assert r.json()["status"] == "interrupted"
+    assert r.json()["recording_retained"] is False
+
+
+def test_genuinely_expired_job_still_404():
+    """Honest expiry is preserved: a job with no dir at all still 404s."""
+    resp = client.get("/api/transcribe/status/ffffffffffffffffffffffffffffffff")
+    assert resp.status_code == 404
+
+    # chunks dir is not a job dir -> still 404
+    resp = client.get("/api/transcribe/status/chunks")
+    assert resp.status_code == 404

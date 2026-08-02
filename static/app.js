@@ -142,6 +142,8 @@
       showResumeResult(status.result, jobId, status.expires_at);
     } else if (status.status === "failed") {
       showResumeError(status.error || "Transcription failed");
+    } else if (status.status === "interrupted") {
+      showResumeInterrupted(status);
     } else {
       // processing / pending — show progress and start polling
       showResumeProgress(status, jobId);
@@ -178,6 +180,9 @@
         } else if (status.status === "failed") {
           clearInterval(pollTimer);
           showResumeError(status.error || "Transcription failed");
+        } else if (status.status === "interrupted") {
+          clearInterval(pollTimer);
+          showResumeInterrupted(status);
         } else {
           showResumeProgress(status, jobId);
         }
@@ -246,6 +251,21 @@
     els.resumeStatus.classList.add("hidden");
     els.resumeError.classList.remove("hidden");
     els.resumeError.textContent = msg;
+    els.resumeHomeBtn.classList.remove("hidden");
+  }
+
+  function showResumeInterrupted(status) {
+    els.resumeView.classList.remove("hidden");
+    els.resumeTitle.textContent = "Transcription interrupted";
+    els.resumeStatus.classList.add("hidden");
+    els.resumeError.classList.remove("hidden");
+    const recordingMsg = status.recording_retained
+      ? " Your recording was kept on the server, but it was not transcribed."
+      : " The temporary recording has since been removed from the server.";
+    els.resumeError.textContent =
+      "This transcription was interrupted before it finished — the server restarted or crashed while it was running." +
+      recordingMsg +
+      " Please start a new transcription and upload your recording again.";
     els.resumeHomeBtn.classList.remove("hidden");
   }
 
@@ -548,6 +568,10 @@
             resetUploadUI();
           } else if (status.status === "failed") {
             showToast(`Transcription failed: ${status.error || "unknown error"}`);
+            resetUploadUI();
+          } else if (status.status === "interrupted") {
+            // Server restarted mid-job; the recording may still be retained.
+            showResumeInterrupted(status);
             resetUploadUI();
           } else {
             // processing — update progress

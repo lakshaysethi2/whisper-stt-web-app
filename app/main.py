@@ -33,6 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 VALID_LANG_RE = re.compile(r"^[a-z]{2}(-[a-zA-Z]{2,})?$")
+_JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 # Directory for in-progress chunked uploads.
 CHUNK_DIR = WORK_DIR / "chunks"
@@ -68,7 +69,11 @@ def _status_file(job_dir: Path) -> Path:
 
 
 def _persist_job(job_id: str, job_data: dict) -> None:
-    """Best-effort write job status+result to disk for resume after restart."""
+    """Best-effort write job status+result to disk.
+
+    Called at job CREATION (status "processing") and again on completion/failure,
+    so a restart can restore the job instead of reporting it as expired.
+    """
     try:
         job_dir = get_job_dir(job_id)
         sf = _status_file(job_dir)
@@ -79,26 +84,83 @@ def _persist_job(job_id: str, job_data: dict) -> None:
         logger.warning("Failed to persist job %s to disk: %s", job_id, e)
 
 
+def _is_job_dir(p: Path) -> bool:
+    """True if p looks like a transcription job directory (32-hex uuid name)."""
+    return p.is_dir() and p.name != "chunks" and bool(_JOB_ID_RE.match(p.name))
+
+
+INTERRUPTED_ERROR = (
+    "Transcription was interrupted before it finished "
+    "(server restart or crash). The recording is retained on the server; "
+    "please re-upload to transcribe."
+)
+
+
+def _read_persisted_job(job_dir: Path) -> dict | None:
+    """Read one job dir's persisted state.
+
+    Returns a job dict, or None when the dir has no usable status.json
+    (e.g. a crash between dir creation and persist, or legacy dirs).
+    Persisted "processing"/"pending" jobs are restored as "interrupted" — the
+    process that was transcribing them is gone after a restart.
+    """
+    sf = job_dir / "status.json"
+    if not sf.exists():
+        return None
+    try:
+        data = json.loads(sf.read_text())
+    except Exception:
+        return None
+    status = data.get("status")
+    if status in ("completed", "failed"):
+        return data
+    if status in ("processing", "pending"):
+        data = dict(data)
+        data["status"] = "interrupted"
+        data["error"] = INTERRUPTED_ERROR
+        return data
+    return None
+
+
+def _job_has_recording(job_id: str) -> bool:
+    """True if the job dir still holds its uploaded recording (input* files)."""
+    try:
+        d = WORK_DIR / job_id
+        if not d.is_dir():
+            return False
+        return any(p.is_file() and p.name.startswith("input") for p in d.iterdir())
+    except OSError:
+        return False
+
+
 def _load_persisted_jobs() -> dict[str, dict]:
-    """Load completed/failed job statuses from disk into in-memory store.
-    Running jobs from a previous process are treated as unknown/expired.
+    """Load job statuses from disk into the in-memory store.
+
+    - completed/failed jobs are restored as-is;
+    - dirs with a "processing"/"pending" status.json (persisted at creation),
+      or with no valid status at all, are restored as "interrupted" — the job
+      was in flight when the process died. NEVER treated as unknown/expired.
     """
     loaded: dict[str, dict] = {}
     if not WORK_DIR.exists():
         return loaded
     for p in list(WORK_DIR.iterdir()):
-        if not p.is_dir() or p.name == "chunks":
-            continue
-        sf = p / "status.json"
-        if not sf.exists():
+        if not _is_job_dir(p):
             continue
         try:
-            data = json.loads(sf.read_text())
-            if data.get("status") in ("completed", "failed"):
-                job_id = p.name
-                data["created_at"] = data.get("created_at", p.stat().st_mtime)
-                loaded[job_id] = data
-                logger.info("Loaded persisted job %s (status=%s)", job_id, data["status"])
+            data = _read_persisted_job(p)
+            if data is None:
+                # Job dir exists but no valid status (crash before persist, or
+                # legacy dir from before status.json was written at creation):
+                # report as interrupted, never expired.
+                data = {
+                    "status": "interrupted",
+                    "error": INTERRUPTED_ERROR,
+                    "created_at": p.stat().st_mtime,
+                }
+            data["created_at"] = data.get("created_at", p.stat().st_mtime)
+            loaded[p.name] = data
+            logger.info("Loaded persisted job %s (status=%s)", p.name, data["status"])
         except Exception as e:
             logger.warning("Failed to load persisted job %s: %s", p.name, e)
     return loaded
@@ -607,13 +669,15 @@ async def upload_finish(
         _finish_locks.discard(upload_id)
 
         # Register the job BEFORE spawning the background task so a fast-polling
-        # client cannot see "not found" between spawn and registration.
+        # client cannot see "not found" between spawn and registration. Persist
+        # at creation so a restart can restore this job (as "interrupted").
         async with _jobs_lock:
             _jobs[job_id] = {
                 "status": "processing",
                 "progress": 0.0,
                 "created_at": time.time(),
             }
+        _persist_job(job_id, _jobs[job_id])
 
         logger.info(
             "Spawned transcription job=%s file=%s (%d bytes) lang=%s",
@@ -682,7 +746,22 @@ async def transcribe_status(job_id: str):
     async with _jobs_lock:
         job = _jobs.get(job_id)
     if job is None:
-        raise HTTPException(404, "Job not found (or expired)")
+        # Not in memory: the job may have been interrupted by a restart/crash
+        # while its dir (and possibly the recording) is still on disk. Report
+        # "interrupted" — NEVER expired. Only a missing dir is genuinely expired.
+        job_dir = WORK_DIR / job_id
+        if _is_job_dir(job_dir):
+            persisted = _read_persisted_job(job_dir)
+            if persisted is None:
+                persisted = {
+                    "status": "interrupted",
+                    "error": INTERRUPTED_ERROR,
+                    "created_at": job_dir.stat().st_mtime,
+                }
+            persisted["created_at"] = persisted.get("created_at", job_dir.stat().st_mtime)
+            job = persisted
+        else:
+            raise HTTPException(404, "Job not found (or expired)")
 
     now_ts = time.time()
     elapsed = now_ts - job["created_at"]
@@ -710,6 +789,18 @@ async def transcribe_status(job_id: str):
         response["result"] = job["result"]
     elif job["status"] == "failed":
         response["error"] = job.get("error", "Unknown error")
+    elif job["status"] == "interrupted":
+        response["progress"] = 0.0
+        retained = _job_has_recording(job_id)
+        response["recording_retained"] = retained
+        if retained:
+            response["error"] = job.get("error", INTERRUPTED_ERROR)
+        else:
+            response["error"] = (
+                "Transcription was interrupted before it finished "
+                "(server restart or crash), and the recording is no longer on the "
+                "server. Please re-upload to transcribe."
+            )
     return JSONResponse(response)
 
 
@@ -769,7 +860,8 @@ async def transcribe(
     # Validate model choice (required, no silent default)
     chosen_model = validate_model(model)
 
-    # Register the job BEFORE spawning the background task
+    # Register the job BEFORE spawning the background task. Persist at creation
+    # so a restart can restore this job (as "interrupted") instead of expiring it.
     async with _jobs_lock:
         _jobs[job_id] = {
             "status": "processing",
@@ -777,6 +869,7 @@ async def transcribe(
             "model": chosen_model,
             "created_at": time.time(),
         }
+    _persist_job(job_id, _jobs[job_id])
 
     logger.info(
         "Transcribing %s (%d bytes) lang=%s job=%s",

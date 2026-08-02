@@ -173,6 +173,10 @@ Retention is **split**: the transcription result is worth keeping, the recording
 - **Recordings** (the uploaded input audio) are deleted **sooner**: immediately when
   transcription finishes, and no later than `AUDIO_RETENTION_SECONDS` (default **30 min**)
   for abandoned/crashed jobs.
+- **Interrupted jobs**: `status.json` is written at job creation, so a job killed by a
+  restart/crash is restored as `"interrupted"` (with `recording_retained` and re-upload
+  guidance) instead of a misleading "expired". Only a job whose directory no longer exists
+  is reported as expired.
 
 ⚠️ **tmpfs caveat**: on deployments where `WORK_DIR=/tmp/whisper-stt` is a RAM-backed
 `tmpfs` volume (see [docs/deploy-orc.md](docs/deploy-orc.md)), a container restart wipes
@@ -327,7 +331,10 @@ endpoint every 2 seconds until `status` is `completed` or `failed`.
 
 When `status` is `"completed"`, a `result` field is included with the full transcription
 (text, segments, language, duration, etc.). When `status` is `"failed"`, an `error` field
-is included.
+is included. When `status` is `"interrupted"`, the job was in flight when the server
+restarted/crashed: `error` contains re-upload guidance and `recording_retained` says
+whether the uploaded recording is still on disk. An `interrupted` job is **never** reported
+as expired while its directory exists.
 
 Jobs are kept for `JOB_RETENTION_SECONDS` (default 1 week); the uploaded recording is
 deleted earlier (`AUDIO_RETENTION_SECONDS`, default 30 min, and immediately on completion).
