@@ -19,8 +19,10 @@ from app.config import (
     MIN_FREE_DISK_BYTES, check_disk_space,
     ALLOWED_EXTENSIONS, SUPPORTED_MODELS, UI_MODEL_CHOICES,
     validate_model,
-    get_job_dir, cleanup_job,
+    get_job_dir, cleanup_job, cleanup_job_audio,
     cleanup_all_jobs, WORK_DIR, JOB_RETENTION_SECONDS,
+    AUDIO_RETENTION_SECONDS,
+    job_created_at, cleanup_stale_input_audio,
 )
 from app.transcriber import load_model, transcribe_audio, get_progress, get_loaded_models, _device_info
 
@@ -119,41 +121,35 @@ async def periodic_cleanup(interval_seconds: int = 600):
                     if jstate.get("status") in ("processing", "pending"):
                         running_ids.add(jid)
 
+            # Clean chunk sessions (their own lifecycle) inline; job dirs are
+            # handled by the retention-aware sweep below.
             for p in list(WORK_DIR.iterdir()):
+                if not p.is_dir() or p.name != "chunks":
+                    continue
                 try:
-                    if not p.is_dir():
-                        continue
-
-                    if p.name == "chunks":
-                        for cp in list(p.iterdir()):
-                            try:
-                                if not cp.is_dir():
-                                    continue
-                                meta_path = cp / "meta.json"
-                                created = cp.stat().st_mtime
-                                if meta_path.exists():
-                                    try:
-                                        meta = json.loads(meta_path.read_text())
-                                        created = meta.get("created", created)
-                                    except Exception:
-                                        pass
-                                if now - created > max_age:
-                                    logger.info("Removing expired chunk session: %s (age: %.1fs)", cp.name, now - created)
-                                    shutil.rmtree(cp, ignore_errors=True)
-                            except Exception as cp_err:
-                                logger.error("Error cleaning up chunk session %s: %s", cp.name, cp_err)
-                        continue
-
-                    # Skip still-running jobs
-                    if p.name in running_ids:
-                        continue
-
-                    mtime = p.stat().st_mtime
-                    if now - mtime > max_age:
-                        logger.info("Removing expired job directory: %s (age: %.1fs)", p.name, now - mtime)
-                        shutil.rmtree(p, ignore_errors=True)
+                    for cp in list(p.iterdir()):
+                        try:
+                            if not cp.is_dir():
+                                continue
+                            meta_path = cp / "meta.json"
+                            created = cp.stat().st_mtime
+                            if meta_path.exists():
+                                try:
+                                    meta = json.loads(meta_path.read_text())
+                                    created = meta.get("created", created)
+                                except Exception:
+                                    pass
+                            if now - created > max_age:
+                                logger.info("Removing expired chunk session: %s (age: %.1fs)", cp.name, now - created)
+                                shutil.rmtree(cp, ignore_errors=True)
+                        except Exception as cp_err:
+                            logger.error("Error cleaning up chunk session %s: %s", cp.name, cp_err)
                 except Exception as p_err:
-                    logger.error("Error checking path %s during cleanup: %s", p.name, p_err)
+                    logger.error("Error cleaning chunk directory %s: %s", p.name, p_err)
+
+            # Retention-aware sweep: transcripts expire after JOB_RETENTION_SECONDS,
+            # recordings are deleted after AUDIO_RETENTION_SECONDS (sooner).
+            _cleanup_expired_jobs(now, running_ids)
 
             # Sweep stale job entries from the in-memory job store.
             try:
@@ -183,6 +179,36 @@ async def periodic_cleanup(interval_seconds: int = 600):
             break
         except Exception as e:
             logger.error("Unexpected error in periodic cleanup loop: %s", e)
+
+
+def _cleanup_expired_jobs(now: float, running_ids: set[str]) -> list[str]:
+    """Retention-aware sweep of job directories (shared by periodic_cleanup).
+
+    - Removes job dirs older than JOB_RETENTION_SECONDS entirely.
+    - Deletes input recordings older than AUDIO_RETENTION_SECONDS in kept dirs.
+    - Never touches still-running jobs or the "chunks" session directory.
+    Returns the ids of removed job dirs.
+    """
+    removed: list[str] = []
+    if not WORK_DIR.exists():
+        return removed
+    for p in list(WORK_DIR.iterdir()):
+        try:
+            if not p.is_dir() or p.name == "chunks":
+                continue
+            # Skip still-running jobs
+            if p.name in running_ids:
+                continue
+            created = job_created_at(p)
+            if now - created > JOB_RETENTION_SECONDS:
+                logger.info("Removing expired job directory: %s (age: %.1fs)", p.name, now - created)
+                shutil.rmtree(p, ignore_errors=True)
+                removed.append(p.name)
+            elif cleanup_stale_input_audio(p, now):
+                logger.info("Removed stale input audio for job %s (kept transcript)", p.name)
+        except Exception as p_err:
+            logger.error("Error checking path %s during cleanup: %s", p.name, p_err)
+    return removed
 
 
 @asynccontextmanager
@@ -305,6 +331,9 @@ async def upload_config():
         "max_chunks": MAX_CHUNKS,
         "direct_upload_threshold": DIRECT_UPLOAD_THRESHOLD,
         "allowed_extensions": sorted(ALLOWED_EXTENSIONS),
+        # Retention settings (additive): transcripts vs recordings have different TTLs.
+        "job_retention_seconds": JOB_RETENTION_SECONDS,
+        "audio_retention_seconds": AUDIO_RETENTION_SECONDS,
     }
 
 
@@ -621,7 +650,9 @@ async def upload_finish(
                     }
                 _persist_job(job_id, _jobs[job_id])
             finally:
-                cleanup_job(job_id)
+                # Keep status.json (the transcript) for resume; drop the recording
+                # audio as soon as it is no longer needed.
+                cleanup_job_audio(job_id)
 
         task = asyncio.create_task(_run_transcription())
         _tasks.add(task)
@@ -653,11 +684,17 @@ async def transcribe_status(job_id: str):
     if job is None:
         raise HTTPException(404, "Job not found (or expired)")
 
-    elapsed = time.time() - job["created_at"]
+    now_ts = time.time()
+    elapsed = now_ts - job["created_at"]
+    expires_at = job["created_at"] + JOB_RETENTION_SECONDS
     response = {
         "job_id": job_id,
         "status": job["status"],
         "elapsed_seconds": round(elapsed, 1),
+        # Honest expiry: transcripts are kept for JOB_RETENTION_SECONDS.
+        "retention_seconds": JOB_RETENTION_SECONDS,
+        "expires_at": round(expires_at, 1),
+        "expires_in_seconds": max(0.0, round(expires_at - now_ts, 1)),
     }
     if job["status"] == "processing":
         # Real progress from transcriber (audio position / total duration)
@@ -774,7 +811,9 @@ async def transcribe(
                 }
             _persist_job(job_id, _jobs[job_id])
         finally:
-            cleanup_job(job_id)
+            # Keep status.json (the transcript) for resume; drop the recording
+            # audio as soon as it is no longer needed.
+            cleanup_job_audio(job_id)
 
     task = asyncio.create_task(_run_transcribe())
     _tasks.add(task)

@@ -48,6 +48,9 @@
   const uploadConfig = {
     chunkSize: 5 * 1024 * 1024,
     directUploadThreshold: 50 * 1024 * 1024,
+    // Retention defaults mirror app/config.py; refreshed from /api/upload/config.
+    jobRetentionSeconds: 7200,
+    audioRetentionSeconds: 1800,
   };
 
   let pollTimer = null;
@@ -95,6 +98,8 @@
         const cfg = await configResult.value.json();
         uploadConfig.chunkSize = cfg.chunk_size || uploadConfig.chunkSize;
         uploadConfig.directUploadThreshold = cfg.direct_upload_threshold || uploadConfig.directUploadThreshold;
+        uploadConfig.jobRetentionSeconds = cfg.job_retention_seconds || uploadConfig.jobRetentionSeconds;
+        uploadConfig.audioRetentionSeconds = cfg.audio_retention_seconds || uploadConfig.audioRetentionSeconds;
       }
     } catch {}
 
@@ -134,7 +139,7 @@
     }
 
     if (status.status === "completed") {
-      showResumeResult(status.result, jobId);
+      showResumeResult(status.result, jobId, status.expires_at);
     } else if (status.status === "failed") {
       showResumeError(status.error || "Transcription failed");
     } else {
@@ -169,7 +174,7 @@
         const status = await r.json();
         if (status.status === "completed") {
           clearInterval(pollTimer);
-          showResumeResult(status.result, jobId);
+          showResumeResult(status.result, jobId, status.expires_at);
         } else if (status.status === "failed") {
           clearInterval(pollTimer);
           showResumeError(status.error || "Transcription failed");
@@ -223,12 +228,12 @@
     els.resumeHomeBtn.classList.remove("hidden");
   }
 
-  function showResumeResult(result, jobId) {
+  function showResumeResult(result, jobId, expiresAt) {
     els.resumeView.classList.add("hidden");
     showMainUI();
     showResult(result);
-    // Add the save link with the completed job URL
-    showSaveLink(jobId);
+    // Add the save link with the completed job URL and its real expiry
+    showSaveLink(jobId, expiresAt);
     // Show "Start new transcription" button in the result toolbar
     if (els.resultNewBtn) {
       els.resultNewBtn.classList.remove("hidden");
@@ -249,18 +254,33 @@
     els.resumeTitle.textContent = "Job not found";
     els.resumeStatus.classList.add("hidden");
     els.resumeError.classList.remove("hidden");
+    const jobWindow = formatRetention(uploadConfig.jobRetentionSeconds);
+    const audioWindow = formatRetention(uploadConfig.audioRetentionSeconds);
     els.resumeError.textContent =
-      "This transcription job has expired or the server has restarted. " +
-      "Jobs are kept for a limited time. Please start a new transcription.";
+      "This transcription job has expired or is no longer available. " +
+      `Transcriptions are kept for about ${jobWindow} after transcription ` +
+      `(the recording audio is deleted after about ${audioWindow}). ` +
+      "If the server has restarted, jobs stored on temporary storage may have been lost. " +
+      "Please start a new transcription.";
     els.resumeHomeBtn.classList.remove("hidden");
   }
 
   // --- Save link UI ---
 
-  function showSaveLink(jobId) {
+  function showSaveLink(jobId, expiresAt) {
     const url = absoluteJobUrl(jobId);
     els.saveLinkUrl.textContent = url;
     els.saveLinkUrl.href = url;
+    if (els.saveLinkNote) {
+      if (expiresAt) {
+        els.saveLinkNote.textContent =
+          `This result is kept until ${formatExpiry(expiresAt)} ` +
+          `(about ${formatRetention(uploadConfig.jobRetentionSeconds)} after transcription).`;
+      } else {
+        els.saveLinkNote.textContent =
+          `This link works for about ${formatRetention(uploadConfig.jobRetentionSeconds)} after transcription.`;
+      }
+    }
     els.saveLink.classList.remove("hidden");
 
     // Copy button
@@ -524,7 +544,7 @@
         .then((status) => {
           if (status.status === "completed") {
             showResult(status.result);
-            showSaveLink(jobId);
+            showSaveLink(jobId, status.expires_at);
             resetUploadUI();
           } else if (status.status === "failed") {
             showToast(`Transcription failed: ${status.error || "unknown error"}`);
@@ -823,6 +843,29 @@
   }
 
   // --- Utilities ---
+
+  function formatRetention(seconds) {
+    const totalMinutes = Math.round((seconds || 0) / 60);
+    if (totalMinutes < 60) {
+      return totalMinutes === 1 ? "1 minute" : `${totalMinutes} minutes`;
+    }
+    const hours = totalMinutes / 60;
+    if (Number.isInteger(hours)) {
+      return hours === 1 ? "1 hour" : `${hours} hours`;
+    }
+    return `${hours.toFixed(1)} hours`;
+  }
+
+  function formatExpiry(epochSeconds) {
+    if (!epochSeconds) return "";
+    const d = new Date(epochSeconds * 1000);
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
 
   function errorMessage(err, fallback) {
     if (typeof err.detail === "string") return err.detail;
