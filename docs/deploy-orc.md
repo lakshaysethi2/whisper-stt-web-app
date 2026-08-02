@@ -70,7 +70,7 @@ Disk is tight. The app includes several safeguards:
    **2 GB** (configurable via env var).
 4. **Periodic cleanup**: Stale jobs and chunk sessions older than 30 minutes
    are automatically removed every 10 minutes. Transcripts (status.json) are
-   kept for `JOB_RETENTION_SECONDS` (default 2 h); recordings are deleted
+   kept for `JOB_RETENTION_SECONDS` (default 1 week); recordings are deleted
    earlier (`AUDIO_RETENTION_SECONDS`, default 30 min, and immediately on
    completion).
 5. **Startup cleanup**: Only expired jobs/recordings are removed on start —

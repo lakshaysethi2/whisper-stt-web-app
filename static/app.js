@@ -49,7 +49,7 @@
     chunkSize: 5 * 1024 * 1024,
     directUploadThreshold: 50 * 1024 * 1024,
     // Retention defaults mirror app/config.py; refreshed from /api/upload/config.
-    jobRetentionSeconds: 7200,
+    jobRetentionSeconds: 604800,
     audioRetentionSeconds: 1800,
   };
 
@@ -152,7 +152,7 @@
   function startResumePolling(jobId) {
     if (pollTimer) clearInterval(pollTimer);
     const POLL_INTERVAL_MS = 2000;
-    const POLL_TIMEOUT_MS = 3 * 3600 * 1000; // 3 hours (backend retention default is 2h, generous margin)
+    const POLL_TIMEOUT_MS = 3 * 3600 * 1000; // 3 hours (backend retention default is 1 week, generous margin)
     const pollStart = Date.now();
 
     pollTimer = setInterval(async () => {

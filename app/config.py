@@ -11,8 +11,9 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "536870912"))   # 512 MB (default; safer for tight-disk VPS)
 MIN_FREE_DISK_BYTES = int(os.getenv("MIN_FREE_DISK_BYTES", "2147483648"))  # 2 GB minimum free space
-# Transcripts (status.json / result text) are kept for at least 1 hour (default 2h).
-JOB_RETENTION_SECONDS = int(os.getenv("JOB_RETENTION_SECONDS", "7200"))  # 2 hours default
+# Transcripts (status.json / result text) are kept for 1 week (captain requirement,
+# supersedes the earlier 2h default). Minimum requirement: >= 1 hour.
+JOB_RETENTION_SECONDS = int(os.getenv("JOB_RETENTION_SECONDS", "604800"))  # 1 week default
 # Recordings (input audio) are deleted sooner than transcripts (default 30 min).
 # The input is also removed immediately when a job completes/fails (cleanup_job_audio),
 # so this TTL mainly covers abandoned/crashed jobs whose input was never cleaned up.

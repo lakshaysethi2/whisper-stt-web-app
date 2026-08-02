@@ -89,7 +89,7 @@ The GPU override:
 | `HOST_PORT` | `8561` | Host port mapping |
 | `MAX_FILE_SIZE` | `536870912` (512 MB) | Max upload size in bytes |
 | `MIN_FREE_DISK_BYTES` | `2147483648` (2 GB) | Minimum free disk space before rejecting uploads |
-| `JOB_RETENTION_SECONDS` | `7200` (2 h) | How long transcription **results** (status.json) are kept |
+| `JOB_RETENTION_SECONDS` | `604800` (1 week) | How long transcription **results** (status.json) are kept |
 | `AUDIO_RETENTION_SECONDS` | `1800` (30 min) | How long the uploaded **recording** is kept before deletion |
 | `MEM_LIMIT` | `8g` | Container memory limit |
 | `HF_TOKEN` | — | Hugging Face token for gated models |
@@ -167,7 +167,7 @@ The app includes multiple safeguards for deployment on hosts with limited disk:
 Retention is **split**: the transcription result is worth keeping, the recording is not.
 
 - **Transcripts** (`status.json` with the full result text) are kept for
-  `JOB_RETENTION_SECONDS` (default **2 hours**, guaranteed ≥ 1 h). Completed/failed jobs
+  `JOB_RETENTION_SECONDS` (default **1 week**, requirement ≥ 1 h). Completed/failed jobs
   are persisted to disk and reloaded on restart, so bookmarkable `/j/{job_id}` links keep
   working across restarts.
 - **Recordings** (the uploaded input audio) are deleted **sooner**: immediately when
@@ -329,7 +329,7 @@ When `status` is `"completed"`, a `result` field is included with the full trans
 (text, segments, language, duration, etc.). When `status` is `"failed"`, an `error` field
 is included.
 
-Jobs are kept for `JOB_RETENTION_SECONDS` (default 2 hours); the uploaded recording is
+Jobs are kept for `JOB_RETENTION_SECONDS` (default 1 week); the uploaded recording is
 deleted earlier (`AUDIO_RETENTION_SECONDS`, default 30 min, and immediately on completion).
 Running jobs are never cleaned up. Job status is persisted to disk under
 `WORK_DIR/<job_id>/status.json` so that completed/failed results survive container restart
