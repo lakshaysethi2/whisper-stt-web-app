@@ -23,12 +23,13 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **Backend**: requirements pins `crisperwhisper[transformers]==2.0.1`. Do NOT install `[ct2]` here: it conflicts with faster-whisper's upstream ctranslate2 (overwrites the fork) and has no ARM64 wheels (audio.lak.nz is ARM64). `_resolve_crisper_backend_choice()` in app/transcriber.py never passes `backend="auto"` straight through (the library's auto picks ct2 whenever any ctranslate2 is importable) — it checks for the `ctranslate2-crisperwhisper` distribution.
 - **Single dedicated thread**: CrisperWhisper models load AND run on `_crisper_executor` (`ThreadPoolExecutor(max_workers=1)`) — upstream requires model creation and inference on one thread (ct2 recovery primitives are thread-affine). Never call `CrisperWhisperModel.transcribe` off that executor.
 - **Result shape**: same as faster-whisper (`text`, `segments[].text/t0/t1` ms) plus `mode`, `backend`, top-level `words` and per-segment `words` (`{word, t0, t1}` ms). Always calls `word_timestamps=True`. Progress stays `None` → UI shows "working, progress unknown".
+- **Container audio**: `_prepare_crisper_audio()` in `app/transcriber.py` ffmpeg-decodes non-WAV uploads to 16 kHz mono PCM WAV before CrisperWhisper (upstream `load_audio` is soundfile-first; no librosa in image). WAV passthrough. See `tests/test_crisperwhisper.py` + `tests/fixtures/tone.mp4`.
 - **Dockerfile.cpu** installs CPU-only `torch` from `https://download.pytorch.org/whl/cpu` before `-r requirements.txt` so the nvidia-* CUDA wheels aren't pulled into CPU images. The GPU Dockerfile omits that step.
 
 ## Tests
 
 - Run via `python -m pytest tests/ -v` (uses uv venv at `.venv/`)
-- Key test files: `tests/test_chunked_upload.py`
+- Key test files: `tests/test_chunked_upload.py`, `tests/test_crisperwhisper.py`
 - Tests mock `app.main.transcribe_audio` using `_make_async_mock` helper for fast/slow results
 - SPA route tests: `test_spa_job_route_serves_html`, `test_spa_job_route_any_job_id`
 - UUID entropy test: `test_job_id_has_full_uuid_entropy` (asserts 32-char hex)
