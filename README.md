@@ -1,8 +1,9 @@
 # Whisper STT Web App
 
-A self-hosted speech-to-text web application powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2). Upload audio files or record directly from your microphone — transcription runs on your server.
+A self-hosted speech-to-text web application powered by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) **and** [CrisperWhisper 2.0](https://github.com/nyrahealth/CrisperWhisper) (verbatim ASR with word-level timestamps). Upload audio files or record directly from your microphone — transcription runs on your server.
 
 - **CPU-friendly** — Default model is `base` (74M params). Runs efficiently on CPU with int8 quantization.
+- **Verbatim ASR** — Optional CrisperWhisper 2.0 models transcribe exactly what was said, including `[um]`, repeats and stutters, with word-level timestamps; `intended` mode returns the clean version.
 - **GPU optional** — Activate GPU support with a compose override for NVIDIA GPUs.
 - **ARM compatible** — Dockerfile.cpu targets ARM64 (Oracle A1, Raspberry Pi) and x86_64.
 - **Mobile-first PWA** — Install on your phone like a native app.
@@ -11,6 +12,7 @@ A self-hosted speech-to-text web application powered by [faster-whisper](https:/
 
 - **Live recording** — Record audio directly in the browser
 - **File upload** — Upload audio (MP3, WAV, M4A, FLAC, OGG, etc.) or video (MP4, AVI, MOV, MKV, etc.) files
+- **Verbatim transcription (CrisperWhisper 2.0)** — Word-for-word ASR with fillers/repetitions preserved, plus word-level timestamps; `intended` mode gives clean readable text
 - **GPU-accelerated** (optional) — Runs on NVIDIA GPU with CUDA for maximum speed
 - **CPU inference** — Uses int8 quantization for efficient CPU transcription
 - **Auto-detection** — Automatically selects optimal compute type (float16/float32/int8) based on hardware
@@ -84,8 +86,10 @@ The GPU override:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_MODEL` | `base` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo) |
+| `WHISPER_MODEL` | `base` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo, crisperwhisper-large/turbo/medium/small) |
 | `WHISPER_LANGUAGE` | `en` | Language for transcription |
+| `CRISPER_BACKEND` | `auto` | CrisperWhisper runtime: `auto` (prefer ct2 when the `[ct2]` extra is installed, else transformers), `ct2`, or `transformers` |
+| `CRISPER_MODE` | `verbatim` | Default CrisperWhisper transcription mode when a request doesn't specify one: `verbatim` or `intended` |
 | `HOST_PORT` | `8561` | Host port mapping |
 | `MAX_FILE_SIZE` | `536870912` (512 MB) | Max upload size in bytes |
 | `MIN_FREE_DISK_BYTES` | `2147483648` (2 GB) | Minimum free disk space before rejecting uploads |
@@ -100,25 +104,64 @@ See [.env.example](.env.example) for all options.
 
 | Hardware | Recommended Model | Compute Type |
 |----------|-------------------|--------------|
-| CPU only | tiny, base | int8 |
+| CPU only | tiny, base, crisperwhisper-small | int8 / fp32 |
 | 2 GB VRAM | tiny, base | float16/int8 |
 | 4 GB VRAM | base, small | float32 or float16 |
-| 8 GB VRAM | large-v3-turbo | float16, batch=16 |
-| 12 GB+ VRAM | large-v3 | float16, batch=16 |
+| 8 GB VRAM | large-v3-turbo, crisperwhisper-turbo | float16, batch=16 |
+| 12 GB+ VRAM | large-v3, crisperwhisper-large | float16, batch=16 |
 
 ### Mandatory Model Choice
 
-Users must **explicitly choose** a Whisper model before transcribing. The UI offers two options:
+Users must **explicitly choose** a model before transcribing. The UI offers two families:
 
 | Model | Tradeoff |
 |-------|----------|
 | **base** | Faster, lighter on CPU/RAM, OK for drafts/short audio; **lower** transcript quality. |
 | **large-v3-turbo** | Much better quality (recommended for best accuracy); slower and heavier on CPU/RAM; long files take longer. |
+| **crisperwhisper-small** | Verbatim word-for-word ASR (fillers/repeats preserved), word-level timestamps; ~0.5 GB download; lighter of the CrisperWhisper set. |
+| **crisperwhisper-medium** | Verbatim word-for-word; near-large quality; ~1.5 GB download. |
+| **crisperwhisper-turbo** | Verbatim word-for-word; fastest large option; ~1.6 GB download. |
+| **crisperwhisper-large** | Verbatim word-for-word; best open quality; ~3.1 GB download; heaviest. |
 
 - No pre-selected default — the user must actively pick.
 - The server rejects transcribe/finish requests with a `400` error if `model` is missing or invalid.
 - The server shows the runtime device (cpu vs cuda) so the user understands server load.
 - Models are loaded on demand with lazy caching: switching model in the UI loads it into memory.
+
+## CrisperWhisper 2.0 (verbatim ASR)
+
+[CrisperWhisper 2.0](https://github.com/nyrahealth/CrisperWhisper) (models: `nyralabs/CrisperWhisper2.0_{large,turbo,medium,small}`) is a Whisper-class ASR that makes the verbatim-vs-intended choice explicit and controllable:
+
+- **Verbatim (default)** — exactly what was said: `[um] so we we need to, to reschedule the th- thursday meeting`
+- **Intended** — the clean version the speaker meant: `So we need to reschedule the Thursday meeting`
+- **Word-level timestamps** — every result includes per-word `t0`/`t1` (ms) alongside the usual segments.
+- Long audio (>30 s) is handled automatically by the library (continuation longform); the backend serializes inference on a single dedicated thread (upstream requirement).
+
+### Choosing verbatim vs intended
+
+- Pick **verbatim** when the raw spoken audio matters: clinical notes, disfluency analysis, dataset construction, anything where fillers/stutters/cut-offs are signal.
+- Pick **intended** when you want clean, readable text: meeting minutes, subtitles, general transcription.
+- The UI shows a "Transcription style" selector whenever a `crisperwhisper-*` model is chosen; the API accepts a `mode=verbatim|intended` parameter per job (defaults to `verbatim`, or `CRISPER_MODE` if set). Faster-whisper models ignore the mode.
+
+### Backend / GPU-CPU tradeoffs
+
+- This app installs `crisperwhisper[transformers]` (pure PyTorch) **on purpose**:
+  - The `[ct2]` extra conflicts with faster-whisper — faster-whisper depends on upstream `ctranslate2`, which overwrites the `ctranslate2-crisperwhisper` fork's files in site-packages.
+  - The `[ct2]` wheels are Linux **x86_64 only**; audio.lak.nz is ARM64, so the transformers backend is the only installable option there.
+- `CRISPER_BACKEND=auto` (default) picks the ct2 fork only when it is actually installed (`ctranslate2-crisperwhisper` distribution present); otherwise it uses transformers. To force a backend, set `CRISPER_BACKEND=ct2|transformers`.
+- The transformers backend runs on CPU with fp32 (best speed on ARM) and on CUDA with fp16. It loads with eager attention (required for word-timing cross-attention), so it is slower than the ct2 runtime (~4-5x difference on GPU) but fully functional: verbatim/intended, word timestamps, longform and hallucination repair all work.
+- On the live CPU-only host, expect roughly realtime-factor 0.4 on `crisperwhisper-small` (measured on a 4-core ARM64 Oracle A1); larger models are proportionally slower. CrisperWhisper jobs show "working, progress unknown" in the UI because the library does not expose incremental progress.
+
+### Model downloads & disk
+
+| Choice | HuggingFace repo | Download | RAM (CPU fp32) |
+|--------|------------------|----------|----------------|
+| crisperwhisper-small | `nyralabs/CrisperWhisper2.0_small` | ~0.5 GB | ~1 GB |
+| crisperwhisper-medium | `nyralabs/CrisperWhisper2.0_medium` | ~1.5 GB | ~3 GB |
+| crisperwhisper-turbo | `nyralabs/CrisperWhisper2.0_turbo` | ~1.6 GB | ~3.2 GB |
+| crisperwhisper-large | `nyralabs/CrisperWhisper2.0_large` | ~3.1 GB | ~6.2 GB |
+
+Models are downloaded to the HF cache volume (`hf-cache` → `/cache` in the container; `HF_HOME` elsewhere) on first use. The CrisperWhisper model weights are under the [Nyra Health Non-Commercial Research License](https://huggingface.co/nyralabs/CrisperWhisper2.0_large/blob/main/LICENSE.md) (free for research/non-commercial use; commercial licensing available).
 
 ### Browser-based STT (third-party)
 
@@ -257,7 +300,8 @@ Upload an audio or video file for transcription.
 **Request:** `multipart/form-data`
 - `file` — Audio or video file (required)
 - `language` — Language code, e.g. `en`, `es`, `fr` (optional, defaults to `en`)
-- `model` — Whisper model name, `base` or `large-v3-turbo` (required, no default)
+- `model` — Whisper model name, `base`, `large-v3-turbo`, or `crisperwhisper-{large,turbo,medium,small}` (required, no default)
+- `mode` — CrisperWhisper transcription mode, `verbatim` or `intended` (optional; defaults to `verbatim`; ignored by faster-whisper models)
 
 **Response:** `application/json`
 ```json
@@ -276,6 +320,8 @@ Upload an audio or video file for transcription.
   ]
 }
 ```
+
+CrisperWhisper results add `mode` (`verbatim`/`intended`), `backend` (`ct2`/`transformers`), a top-level `words` list (`{word, t0, t1}` in ms), and a per-segment `words` array; `text`/`segments` keep the same shape so the UI is unchanged.
 
 ### `GET /health`
 
@@ -309,7 +355,7 @@ Upload a single chunk.
 
 ### `POST /api/upload/finish/{upload_id}`
 
-Finalize upload and begin transcription. Returns `{ job_id, status, progress }`;
+Finalize upload and begin transcription. Query params: `language`, `model` (required), `mode` (`verbatim`|`intended`, optional, CrisperWhisper only). Returns `{ job_id, status, progress }`;
 poll `GET /api/transcribe/status/{job_id}` for the result.
 
 ### `GET /api/transcribe/status/{job_id}`

@@ -17,12 +17,22 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **Progress tracking**: `app/transcriber.py` exposes `_progress: dict[str, float]` and `get_progress(job_id)`. Progress = `seg.end / info.duration` (audio position processed). Entire segment iteration runs in `to_thread` to avoid blocking the event loop.
 - **SPA route**: `GET /j/{job_id}` serves `static/index.html` — the frontend reads `job_id` from `window.location.pathname` and resumes polling/display.
 - **Save link UI**: After job creation, browser URL updates to `/j/{job_id}` and a "Save this link" card with copyable absolute URL is shown.
-- **Model choice**: Users must explicitly choose a model (base or large-v3-turbo) before transcribing. No silent default. Rejected with 400 if missing/invalid.
+- **Model choice**: Users must explicitly choose a model (base, large-v3-turbo, or crisperwhisper-large/turbo/medium/small) before transcribing. No silent default. Rejected with 400 if missing/invalid.
+
+## CrisperWhisper 2.0 (verbatim ASR)
+
+- **App-facing names** map to upstream HF ids in `CRISPER_MODEL_IDS` (app/config.py): `crisperwhisper-large` → `nyralabs/CrisperWhisper2.0_large` etc. `is_crisper_model()` routes transcriber paths.
+- **Mode param**: `/api/transcribe` takes `mode` as Form, `/api/upload/finish` as Query (`verbatim|intended`); `validate_mode()` defaults to `CRISPER_MODE` env (default `verbatim`). Faster-whisper models ignore the mode — behavior unchanged.
+- **Backend**: requirements pins `crisperwhisper[transformers]==2.0.1`. Do NOT install `[ct2]` here: it conflicts with faster-whisper's upstream ctranslate2 (overwrites the fork) and has no ARM64 wheels (audio.lak.nz is ARM64). `_resolve_crisper_backend_choice()` in app/transcriber.py never passes `backend="auto"` straight through (the library's auto picks ct2 whenever any ctranslate2 is importable) — it checks for the `ctranslate2-crisperwhisper` distribution.
+- **Single dedicated thread**: CrisperWhisper models load AND run on `_crisper_executor` (`ThreadPoolExecutor(max_workers=1)`) — upstream requires model creation and inference on one thread (ct2 recovery primitives are thread-affine). Never call `CrisperWhisperModel.transcribe` off that executor.
+- **Result shape**: same as faster-whisper (`text`, `segments[].text/t0/t1` ms) plus `mode`, `backend`, top-level `words` and per-segment `words` (`{word, t0, t1}` ms). Always calls `word_timestamps=True`. Progress stays `None` → UI shows "working, progress unknown".
+- **Container audio**: `_prepare_crisper_audio()` in `app/transcriber.py` ffmpeg-decodes non-WAV uploads to 16 kHz mono PCM WAV before CrisperWhisper (upstream `load_audio` is soundfile-first; no librosa in image). WAV passthrough. See `tests/test_crisperwhisper.py` + `tests/fixtures/tone.mp4`.
+- **Dockerfile.cpu** installs CPU-only `torch` from `https://download.pytorch.org/whl/cpu` before `-r requirements.txt` so the nvidia-* CUDA wheels aren't pulled into CPU images. The GPU Dockerfile omits that step.
 
 ## Tests
 
 - Run via `python -m pytest tests/ -v` (uses uv venv at `.venv/`)
-- Key test files: `tests/test_chunked_upload.py`, `tests/test_retention.py` (split retention + startup cleanup + expiry API + interrupted-restart restore)
+- Key test files: `tests/test_chunked_upload.py`, `tests/test_retention.py` (split retention + startup cleanup + expiry API + interrupted-restart restore), `tests/test_crisperwhisper.py`
 - `tests/conftest.py` redirects `WORK_DIR` to a temp dir so tests never touch a real deployment's `/tmp/whisper-stt`
 - Note: TestClient (anyio) cancels handler-spawned background tasks at request end — a harness artifact, NOT production behavior (uvicorn keeps them alive). Tests that need a live in-flight job build the on-disk state directly instead.
 - Tests mock `app.main.transcribe_audio` using `_make_async_mock` helper for fast/slow results

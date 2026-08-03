@@ -115,6 +115,26 @@ Previously the UI silently used the server's WHISPER_MODEL default. Users had no
 6. **WHISPER_MODEL env** — May list available models or cold-start preload policy, but must not force a hidden choice that bypasses the UI.
 7. **Model hot-switching** — Preferred: support request-time model param with lazy load/cache. If single-model process, document restart requirement.
 
+## CrisperWhisper 2.0 (Verbatim ASR)
+
+### Problem
+audio.lak.nz should also support verbatim speech-to-text — transcribing exactly what was said (fillers, repeats, stutters) with word-level timestamps — not just the clean Whisper-style transcripts faster-whisper produces.
+
+### Requirements
+1. **New model family** alongside faster-whisper (do not remove faster-whisper): `crisperwhisper-large/turbo/medium/small` in `UI_MODEL_CHOICES` and `/api/models`, validated exactly like existing models.
+2. **Exact upstream model names** — map to `nyralabs/CrisperWhisper2.0_{large,turbo,medium,small}` (the IDs the upstream `crisperwhisper` package supports).
+3. **Verbatim default, intended optional** — per-job `mode=verbatim|intended` query/form param; defaults to `verbatim` (or `CRISPER_MODE` env). Faster-whisper models ignore the mode and keep their existing behaviour.
+4. **Same result shape** — text/segments/t0/t1 stay identical for the UI; CrisperWhisper results additionally include `mode`, `backend`, a top-level `words` list and per-segment `words` (`{word, t0, t1}` in ms).
+5. **Word-level timestamps always on** — `word_timestamps=True` (no measurable overhead per upstream docs).
+6. **Backend** — install `crisperwhisper[transformers]` (pure PyTorch): the `[ct2]` extra conflicts with faster-whisper's upstream `ctranslate2` and has no ARM64 wheels (audio.lak.nz is Oracle A1 ARM64). `CRISPER_BACKEND=auto` resolves to ct2 only when the `ctranslate2-crisperwhisper` fork is actually installed.
+7. **Single-thread serving** — CrisperWhisper models are loaded AND run on one dedicated `ThreadPoolExecutor(max_workers=1)` thread (upstream requirement for deterministic ct2 recovery; serializes inference).
+8. **Progress** — CrisperWhisper exposes no incremental progress; jobs show honest "working, progress unknown" instead of a stuck 0%.
+9. **UI** — a "Transcription style" selector (verbatim/intended) appears in the Model card only when a `crisperwhisper-*` model is chosen; record/upload flows send `mode`.
+
+### Decisions
+- **transformers over ct2**: faster-whisper is a hard dependency and its upstream `ctranslate2` overwrites the `ctranslate2-crisperwhisper` fork's site-packages files; additionally the fork has no ARM64 wheels. The transformers backend is slower (~4-5x on GPU) but feature-complete (modes, word timings, longform, hallucination repair).
+- **Dockerfile.cpu** installs CPU-only `torch` from the PyTorch CPU index first so the CUDA `nvidia-*` wheel bundle isn't pulled into a CPU-only image.
+
 ## Browser STT Links
 
 ### Requirements

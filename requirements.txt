@@ -4,3 +4,9 @@ python-multipart==0.0.9
 aiofiles==24.1.0
 pydantic==2.9.0
 faster-whisper==1.2.1
+# CrisperWhisper 2.0 verbatim ASR (models: nyralabs/CrisperWhisper2.0_{large,turbo,medium,small}).
+# Uses the pure-PyTorch backend on purpose: the [ct2] extra conflicts with
+# faster-whisper (its upstream ctranslate2 overwrites the ctranslate2-crisperwhisper
+# fork's files) and its wheels are Linux x86_64 only (audio.lak.nz is ARM64).
+# See README "CrisperWhisper 2.0" section for GPU/CPU tradeoffs.
+crisperwhisper[transformers]==2.0.1
