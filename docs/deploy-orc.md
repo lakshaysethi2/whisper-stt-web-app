@@ -84,8 +84,19 @@ Disk is tight. The app includes several safeguards:
 3. **MIN_FREE_DISK_BYTES**: Uploads rejected when host disk free drops below
    **2 GB** (configurable via env var).
 4. **Periodic cleanup**: Stale jobs and chunk sessions older than 30 minutes
-   are automatically removed every 10 minutes.
-5. **Startup cleanup**: All stale job directories are cleaned on container start.
+   are automatically removed every 10 minutes. Transcripts (status.json) are
+   kept for `JOB_RETENTION_SECONDS` (default 1 week); recordings are deleted
+   earlier (`AUDIO_RETENTION_SECONDS`, default 30 min, and immediately on
+   completion).
+5. **Startup cleanup**: Only expired jobs/recordings are removed on start —
+   completed transcripts survive restarts and are reloaded from disk.
+
+> ⚠️ **tmpfs caveat**: `/tmp/whisper-stt` is a `tmpfs` volume (RAM-backed, 2 GB
+> cap) — a container restart wipes **everything**, including completed
+> transcripts, no matter how new they are. Transcripts only survive restarts if
+> `WORK_DIR` points at real disk. If restart-survival matters for whisper-test,
+> consider moving `WORK_DIR` to a persistent volume (deployment config change —
+> not part of this PR).
 
 ### Manual disk ops
 

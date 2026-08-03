@@ -17,3 +17,4 @@ docker-compose.override.yml
 cypress/screenshots/
 cypress/videos/
 cypress/downloads/
+.venv-rebuild/

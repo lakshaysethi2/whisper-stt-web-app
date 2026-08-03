@@ -598,6 +598,12 @@ select:focus {
   flex-shrink: 0;
 }
 
+.save-link-note {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin: 0;
+}
+
 /* Resume view (job page) */
 .resume-view {
   display: flex;

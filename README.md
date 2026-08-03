@@ -93,6 +93,8 @@ The GPU override:
 | `HOST_PORT` | `8561` | Host port mapping |
 | `MAX_FILE_SIZE` | `536870912` (512 MB) | Max upload size in bytes |
 | `MIN_FREE_DISK_BYTES` | `2147483648` (2 GB) | Minimum free disk space before rejecting uploads |
+| `JOB_RETENTION_SECONDS` | `604800` (1 week) | How long transcription **results** (status.json) are kept |
+| `AUDIO_RETENTION_SECONDS` | `1800` (30 min) | How long the uploaded **recording** is kept before deletion |
 | `MEM_LIMIT` | `8g` | Container memory limit |
 | `HF_TOKEN` | — | Hugging Face token for gated models |
 
@@ -199,7 +201,30 @@ The app includes multiple safeguards for deployment on hosts with limited disk:
 3. **MIN_FREE_DISK_BYTES** — Uploads are rejected when host free space drops below 2 GB.
 4. **Periodic cleanup** — Stale job directories and chunk sessions older than 30 minutes
    are removed every 10 minutes.
-5. **Startup cleanup** — All stale data is wiped when the container starts.
+5. **Startup cleanup** — Only **expired** jobs/recordings are removed; completed transcripts
+   survive restarts and are reloaded from disk. (Exception: if `WORK_DIR` is a tmpfs volume,
+   a container restart wipes everything, transcripts included.)
+
+### Job retention (transcripts vs recordings)
+
+Retention is **split**: the transcription result is worth keeping, the recording is not.
+
+- **Transcripts** (`status.json` with the full result text) are kept for
+  `JOB_RETENTION_SECONDS` (default **1 week**, requirement ≥ 1 h). Completed/failed jobs
+  are persisted to disk and reloaded on restart, so bookmarkable `/j/{job_id}` links keep
+  working across restarts.
+- **Recordings** (the uploaded input audio) are deleted **sooner**: immediately when
+  transcription finishes, and no later than `AUDIO_RETENTION_SECONDS` (default **30 min**)
+  for abandoned/crashed jobs.
+- **Interrupted jobs**: `status.json` is written at job creation, so a job killed by a
+  restart/crash is restored as `"interrupted"` (with `recording_retained` and re-upload
+  guidance) instead of a misleading "expired". Only a job whose directory no longer exists
+  is reported as expired.
+
+⚠️ **tmpfs caveat**: on deployments where `WORK_DIR=/tmp/whisper-stt` is a RAM-backed
+`tmpfs` volume (see [docs/deploy-orc.md](docs/deploy-orc.md)), a container restart wipes
+**all** jobs — transcripts included — because the volume itself is volatile. Point
+`WORK_DIR` at a real disk path to make transcripts survive restarts.
 
 ## Test Audio & Accuracy
 
@@ -352,11 +377,18 @@ endpoint every 2 seconds until `status` is `completed` or `failed`.
 
 When `status` is `"completed"`, a `result` field is included with the full transcription
 (text, segments, language, duration, etc.). When `status` is `"failed"`, an `error` field
-is included.
+is included. When `status` is `"interrupted"`, the job was in flight when the server
+restarted/crashed: `error` contains re-upload guidance and `recording_retained` says
+whether the uploaded recording is still on disk. An `interrupted` job is **never** reported
+as expired while its directory exists.
 
-Jobs are kept for `JOB_RETENTION_SECONDS` (default 2 hours). Running jobs are never cleaned up.
-Job status is persisted to disk under `WORK_DIR/<job_id>/status.json` so that completed/failed
-results survive container restart (best-effort).
+Jobs are kept for `JOB_RETENTION_SECONDS` (default 1 week); the uploaded recording is
+deleted earlier (`AUDIO_RETENTION_SECONDS`, default 30 min, and immediately on completion).
+Running jobs are never cleaned up. Job status is persisted to disk under
+`WORK_DIR/<job_id>/status.json` so that completed/failed results survive container restart
+(best-effort; on a tmpfs `WORK_DIR` a restart still wipes everything). The status response
+includes `retention_seconds`, `expires_at` and `expires_in_seconds` so clients can show an
+honest expiry.
 
 ### `GET /j/{job_id}`
 
