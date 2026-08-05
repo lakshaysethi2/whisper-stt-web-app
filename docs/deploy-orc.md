@@ -1,25 +1,28 @@
-# Deploy on orc (Oracle A1 ARM VPS)
+# Deploy on a CPU / ARM VPS
 
-This guide covers deploying whisper-stt-web-app on `ubuntu@orc-4cpu.lak.nz` — an
-**Oracle A1** ARM instance with **no NVIDIA GPU**, ~24 GB RAM, and tight disk
-(~17 GB free, 91% used).
+This guide covers deploying whisper-stt-web-app on a CPU-only (no NVIDIA GPU)
+Linux host, e.g. an ARM VPS. The steps apply to any host where
+`Dockerfile.cpu` is the right image (ARM64 or x86_64 without a GPU).
 
 ## Host environment
 
 | Property | Value |
 |----------|-------|
-| CPU | ARM (Oracle A1, 4 cores) |
-| RAM | ~24 GB |
-| Disk | ~17 GB free (91% used) |
-| GPU | None |
-| OS | Ubuntu (ARM64) |
+| CPU | ARM or x86_64 (no GPU required) |
+| OS | Linux (any distro with Docker) |
+
+Choose a host with enough RAM for the model you plan to run — see the model
+table below and the `MAX_FILE_SIZE` / `MIN_FREE_DISK_BYTES` safeguards for
+disk sizing.
 
 ## Port
 
-The web app listens on host port **8561** (→ container port 8000).
-This is documented across compose, docs, and `.env.example`.
+The web app listens on the host port configured by `HOST_PORT`
+(default **8561**, mapped to container port 8000). This is documented across
+compose, docs, and `.env.example`.
 
-Cloudflare (captain-managed) points the domain to port 8561.
+If you use a domain, point it (e.g. via your DNS provider or a reverse proxy
+such as Cloudflare Tunnel) to the host port above.
 
 ## Quick start
 
@@ -75,7 +78,7 @@ This host is ARM64, so CrisperWhisper runs on the **pure-PyTorch (`transformers`
 
 ## Disk management
 
-Disk is tight. The app includes several safeguards:
+Disk is tight on typical VPS hosts. The app includes several safeguards:
 
 1. **tmpfs work dir**: `/tmp/whisper-stt` is a `tmpfs` volume capped at 2 GB
    — data is lost on restart, never fills the host disk.
@@ -136,7 +139,7 @@ git pull
 docker compose up -d --build
 ```
 
-## GPU deployment (not applicable to orc)
+## GPU deployment
 
 On a GPU-equipped host, use the GPU override:
 ```bash
