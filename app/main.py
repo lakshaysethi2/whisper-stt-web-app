@@ -487,10 +487,16 @@ def _no_node_error(model: str, worker: str) -> str:
     if worker == CPU_NODE:
         return f"{CPU_NODE} transcription is disabled on this deployment."
     if not should_dispatch(model, worker):
+        hint = "tiny, base" if model.startswith("parakeet") else "tiny, base, small"
+        if model.startswith("parakeet"):
+            hint_detail = "Parakeet 0.6B does not fit the small-VRAM workers (and the worker image excludes its torch stack); use a dispatched node that has it installed, or try a lighter model"
+        elif model.startswith("crisper"):
+            hint_detail = "CrisperWhisper needs the torch stack the worker image excludes; use a node that has it, or try a lighter Whisper model"
+        else:
+            hint_detail = f"Try a model that fits the GPU nodes ({hint})"
         return (
             f"Model '{model}' cannot run on any available GPU node and "
-            f"{CPU_NODE} transcription is disabled. Try a model that fits "
-            "the GPU nodes (tiny, base, small)."
+            f"{CPU_NODE} transcription is disabled. {hint_detail}."
         )
     return NO_NODE_ERROR
 

@@ -17,7 +17,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **Progress tracking**: `app/transcriber.py` exposes `_progress: dict[str, float]` and `get_progress(job_id)`. Progress = `seg.end / info.duration` (audio position processed). Entire segment iteration runs in `to_thread` to avoid blocking the event loop.
 - **SPA route**: `GET /j/{job_id}` serves `static/index.html` — the frontend reads `job_id` from `window.location.pathname` and resumes polling/display.
 - **Save link UI**: After job creation, browser URL updates to `/j/{job_id}` and a "Save this link" card with copyable absolute URL is shown.
-- **Model choice**: Users must explicitly choose a model (base, large-v3-turbo, or crisperwhisper-large/turbo/medium/small) before transcribing. No silent default. Rejected with 400 if missing/invalid.
+- **Model choice**: Users must explicitly choose a model (base, large-v3-turbo, crisperwhisper-large/turbo/medium/small, or parakeet-tdt-0.6b-v3) before transcribing. No silent default. Rejected with 400 if missing/invalid.
 
 ## CrisperWhisper 2.0 (verbatim ASR)
 
@@ -26,8 +26,16 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 - **Backend**: requirements pins `crisperwhisper[transformers]==2.0.1`. Do NOT install `[ct2]` here: it conflicts with faster-whisper's upstream ctranslate2 (overwrites the fork) and has no ARM64 wheels (the reference ARM64 host cannot install it). `_resolve_crisper_backend_choice()` in app/transcriber.py never passes `backend="auto"` straight through (the library's auto picks ct2 whenever any ctranslate2 is importable) — it checks for the `ctranslate2-crisperwhisper` distribution.
 - **Single dedicated thread**: CrisperWhisper models load AND run on `_crisper_executor` (`ThreadPoolExecutor(max_workers=1)`) — upstream requires model creation and inference on one thread (ct2 recovery primitives are thread-affine). Never call `CrisperWhisperModel.transcribe` off that executor.
 - **Result shape**: same as faster-whisper (`text`, `segments[].text/t0/t1` ms) plus `mode`, `backend`, top-level `words` and per-segment `words` (`{word, t0, t1}` ms). Always calls `word_timestamps=True`. Progress stays `None` → UI shows "working, progress unknown".
-- **Container audio**: `_prepare_crisper_audio()` in `app/transcriber.py` ffmpeg-decodes non-WAV uploads to 16 kHz mono PCM WAV before CrisperWhisper (upstream `load_audio` is soundfile-first; no librosa in image). WAV passthrough. See `tests/test_crisperwhisper.py` + `tests/fixtures/tone.mp4`.
+- **Container audio**: `_prepare_wav_audio()` (alias `_prepare_crisper_audio`) in `app/transcriber.py` ffmpeg-decodes non-WAV uploads to 16 kHz mono PCM WAV before CrisperWhisper/Parakeet (upstream `load_audio` is soundfile-first; no librosa in image). WAV passthrough. See `tests/test_crisperwhisper.py` + `tests/fixtures/tone.mp4`.
 - **Dockerfile.cpu** installs CPU-only `torch` from `https://download.pytorch.org/whl/cpu` before `-r requirements.txt` so the nvidia-* CUDA wheels aren't pulled into CPU images. The GPU Dockerfile omits that step.
+
+## Parakeet TDT 0.6B v3 (optional fourth family)
+
+- **HF id** `PARAKEET_MODEL_IDS["parakeet-tdt-0.6b-v3"] = "nvidia/parakeet-tdt-0.6b-v3"` in app/config.py; `is_parakeet_model()` mirrors `is_crisper_model()`.
+- **Backend**: `transformers` only — `AutoModelForTDT` + `AutoProcessor` (FastConformer-TDT, 25 EU langs, auto-detect, punct/cap, word+segment timestamps, long-audio via rel_pos_local_attn [256,256] for 3h). Shares torch/transformers/accelerate/soundfile with crisperwhisper[transformers]; requires `transformers>=4.57` (ParakeetForTDT added there; 5.14 was pulled when built, 4.56 path falls back to direct import). Optional: app boots with "Parakeet models unavailable" when missing; install `transformers>=4.57 soundfile torch accelerate` to enable.
+- **Dedicated thread**: `_parakeet_executor` (`ThreadPoolExecutor(max_workers=1)`) like CrisperWhisper — load+infer pinned to one thread. `load_parakeet_model`/`_transcribe_parakeet_sync` mirror Crisper helpers; result shape identical (text/segments/words, punct/cap baked in). Progress `None` → "working, progress unknown"; language auto-detected (param ignored).
+- **VRAM**: 600M, ~2.5 GB download, ~1.2 GB fp16 / 2.4 GB fp32; fits 2 GB GPUs in fp16 (torch fp16 works on Pascal, unlike CTranslate2). OOM raises a named error suggesting the lighter `base` model — never crash the worker. Never dispatched automatically: `WHISPER_GPU_MODELS` still `tiny,base,small`; Parakeet (and Crisper) require the torch stack the worker image excludes, so only an explicitly chosen node would route there.
+- **Worker image caveat**: `Dockerfile.worker` deliberately excludes torch/crisperwhisper; a Parakeet-capable worker would need the full torch stack (separate build/compose). VPS CPU fallback respects `WHISPER_ALLOW_LOCAL_CPU=false` — "No transcription node available" instead of silent CPU use.
 
 ## Node picker + GPU worker dispatch
 

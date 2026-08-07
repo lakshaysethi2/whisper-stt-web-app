@@ -41,6 +41,13 @@ CRISPER_MODEL_IDS = {
     "crisperwhisper-medium": "nyralabs/CrisperWhisper2.0_medium",
     "crisperwhisper-small": "nyralabs/CrisperWhisper2.0_small",
 }
+
+# Parakeet TDT 0.6B v3 — FastConformer-TDT, 25 EU langs, auto-detect,
+# punct/cap, word+segment timestamps, long-audio (24 min / 3h local-attn).
+# See https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+PARAKEET_MODEL_IDS = {
+    "parakeet-tdt-0.6b-v3": "nvidia/parakeet-tdt-0.6b-v3",
+}
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "536870912"))   # 512 MB (default; safer for tight-disk hosts)
 # Minimum free bytes in WORK_DIR before uploads are rejected. Must be well
 # below the default tmpfs work-dir size (2 GB) or the check trips as soon as
@@ -77,6 +84,8 @@ UI_MODEL_CHOICES = [
     "crisperwhisper-turbo",
     "crisperwhisper-medium",
     "crisperwhisper-small",
+    # Parakeet TDT 0.6B v3 (FastConformer-TDT, 25 EU langs, auto-detect)
+    "parakeet-tdt-0.6b-v3",
 ]
 
 SUPPORTED_MODELS = [
@@ -93,12 +102,19 @@ SUPPORTED_MODELS = [
     {"name": "crisperwhisper-turbo", "params": "809M", "vram_fp32": "3400", "vram_fp16": "1700", "disk_gb": "1.6", "family": "crisperwhisper"},
     {"name": "crisperwhisper-medium", "params": "769M", "vram_fp32": "3200", "vram_fp16": "1600", "disk_gb": "1.5", "family": "crisperwhisper"},
     {"name": "crisperwhisper-small", "params": "244M", "vram_fp32": "1200", "vram_fp16": "600", "disk_gb": "0.5", "family": "crisperwhisper"},
+    # Parakeet TDT 0.6B v3: 0.6B FastConformer-TDT, ~2.5 GB download, ~1.2 GB VRAM fp16
+    {"name": "parakeet-tdt-0.6b-v3", "params": "600M", "vram_fp32": "2400", "vram_fp16": "1200", "disk_gb": "2.5", "family": "parakeet"},
 ]
 
 
 def is_crisper_model(model_name: str) -> bool:
     """True if the (already validated) model choice is a CrisperWhisper model."""
     return model_name in CRISPER_MODEL_IDS
+
+
+def is_parakeet_model(model_name: str) -> bool:
+    """True if the (already validated) model choice is a Parakeet model."""
+    return model_name in PARAKEET_MODEL_IDS
 
 
 def validate_model(model_name: str | None) -> str:

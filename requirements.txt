@@ -11,5 +11,12 @@ faster-whisper==1.2.1
 # fork's files) and its wheels are Linux x86_64 only (not installable on the
 # reference ARM64 host). See README "CrisperWhisper 2.0" section for GPU/CPU tradeoffs.
 crisperwhisper[transformers]==2.0.1
+# Parakeet TDT 0.6B v3 (nvidia/parakeet-tdt-0.6b-v3) via transformers pipeline.
+# Shares torch/transformers/accelerate with crisperwhisper[transformers];
+# pinned to avoid pulling incompatible minor versions on ARM.
+# NOTE: keep `transformers>=4.57` or newer — Parakeet needs the ParakeetForTDT backend
+# added in 4.57. soundfile is already pulled by crisperwhisper.
+# Parakeet runtime is optional: app boots with a clear "parakeet not available" when missing.
+transformers>=4.57
 # Node config loader (app/nodes.py reads config/nodes.yaml).
 pyyaml>=6.0

@@ -105,7 +105,7 @@ worker + reverse-tunnel setup.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_MODEL` | `base` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo, crisperwhisper-large/turbo/medium/small) |
+| `WHISPER_MODEL` | `base` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo, crisperwhisper-large/turbo/medium/small, parakeet-tdt-0.6b-v3) |
 | `WHISPER_LANGUAGE` | `en` | Language for transcription |
 | `CRISPER_BACKEND` | `auto` | CrisperWhisper runtime: `auto` (prefer ct2 when the `[ct2]` extra is installed, else transformers), `ct2`, or `transformers` |
 | `CRISPER_MODE` | `verbatim` | Default CrisperWhisper transcription mode when a request doesn't specify one: `verbatim` or `intended` |
@@ -123,15 +123,15 @@ See [.env.example](.env.example) for all options.
 
 | Hardware | Recommended Model | Compute Type |
 |----------|-------------------|--------------|
-| CPU only | tiny, base, crisperwhisper-small | int8 / fp32 |
-| 2 GB VRAM | tiny, base | float16/int8 |
+| CPU only | tiny, base, crisperwhisper-small, parakeet-tdt-0.6b-v3 | int8 / fp32 |
+| 2 GB VRAM | tiny, base, parakeet-tdt-0.6b-v3 | fp16 / fp32 |
 | 4 GB VRAM | base, small | float32 or float16 |
 | 8 GB VRAM | large-v3-turbo, crisperwhisper-turbo | float16, batch=16 |
 | 12 GB+ VRAM | large-v3, crisperwhisper-large | float16, batch=16 |
 
 ### Mandatory Model Choice
 
-Users must **explicitly choose** a model before transcribing. The UI offers two families:
+Users must **explicitly choose** a model before transcribing. The UI offers three families:
 
 | Model | Tradeoff |
 |-------|----------|
@@ -141,6 +141,7 @@ Users must **explicitly choose** a model before transcribing. The UI offers two 
 | **crisperwhisper-medium** | Verbatim word-for-word; near-large quality; ~1.5 GB download. |
 | **crisperwhisper-turbo** | Verbatim word-for-word; fastest large option; ~1.6 GB download. |
 | **crisperwhisper-large** | Verbatim word-for-word; best open quality; ~3.1 GB download; heaviest. |
+| **parakeet-tdt-0.6b-v3** | 600M FastConformer-TDT, 25 EU langs auto-detect, punct/cap, word+segment timestamps; ~2.5 GB download; CC BY 4.0. |
 
 - No pre-selected default — the user must actively pick.
 - The server rejects transcribe/finish requests with a `400` error if `model` is missing or invalid.
@@ -179,6 +180,7 @@ Users must **explicitly choose** a model before transcribing. The UI offers two 
 | crisperwhisper-medium | `nyralabs/CrisperWhisper2.0_medium` | ~1.5 GB | ~3 GB |
 | crisperwhisper-turbo | `nyralabs/CrisperWhisper2.0_turbo` | ~1.6 GB | ~3.2 GB |
 | crisperwhisper-large | `nyralabs/CrisperWhisper2.0_large` | ~3.1 GB | ~6.2 GB |
+| parakeet-tdt-0.6b-v3 | `nvidia/parakeet-tdt-0.6b-v3` | ~2.5 GB | ~1.2 GB (fp16) / 2.4 GB (fp32) |
 
 Models are downloaded to the HF cache volume (`hf-cache` → `/cache` in the container; `HF_HOME` elsewhere) on first use. The CrisperWhisper model weights are under the [Nyra Health Non-Commercial Research License](https://huggingface.co/nyralabs/CrisperWhisper2.0_large/blob/main/LICENSE.md) (free for research/non-commercial use; commercial licensing available).
 
