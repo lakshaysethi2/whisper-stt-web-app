@@ -10,6 +10,10 @@ services:
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
       - CRISPER_BACKEND=${CRISPER_BACKEND:-auto}
       - CRISPER_MODE=${CRISPER_MODE:-verbatim}
+      # GPU worker dispatch (see docs/deploy-laptop-worker.md). Comma-separated
+      # base URLs; empty = transcribe locally only (previous behaviour).
+      - WHISPER_WORKER_URLS=${WHISPER_WORKER_URLS:-}
+      - WHISPER_GPU_MODELS=${WHISPER_GPU_MODELS:-tiny,base,small,crisperwhisper-small}
       - MAX_FILE_SIZE=${MAX_FILE_SIZE:-536870912}
       - MIN_FREE_DISK_BYTES=${MIN_FREE_DISK_BYTES:-2147483648}
       - JOB_RETENTION_SECONDS=${JOB_RETENTION_SECONDS:-7200}
@@ -17,6 +21,10 @@ services:
       - HF_HOME=/cache
     volumes:
       - hf-cache:/cache
+    # Reach the laptop GPU workers (reverse-SSH tunnels bound on this host's
+    # whisper-net gateway, 10.99.0.1) from inside the container.
+    extra_hosts:
+      - "host.docker.internal:${WHISPER_HOST_GATEWAY:-10.99.0.1}"
     tmpfs:
       - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
     restart: unless-stopped

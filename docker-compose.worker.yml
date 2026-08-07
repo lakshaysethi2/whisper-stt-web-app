@@ -1,0 +1,46 @@
+# GPU transcription worker for the laptop workers (audio.lak.nz estate).
+#
+# Standalone deployment: builds and runs the app's GPU image as a worker
+# that the main deployment dispatches jobs to. No public UI — binds localhost
+# only; the VPS reaches it through a reverse SSH tunnel (see
+# docs/deploy-laptop-worker.md).
+#
+# Usage on a laptop:
+#   docker compose -f docker-compose.worker.yml up -d --build
+#
+# Two laptops share the load: laptop1 -> VPS port 8564, laptop2 -> VPS 8565
+# (set HOST_PORT=8565 on laptop2; the tunnel maps it to the VPS port).
+services:
+  whisper-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: whisper-stt-web-app:worker
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8564}:8000"
+    environment:
+      # Small model: the laptop GPUs (Maxwell/Pascal, ~2-4 GB VRAM) run
+      # float32 — medium and up would OOM. Jobs for other models arrive
+      # with their own model name and are loaded on demand.
+      - WHISPER_MODEL=${WHISPER_MODEL:-small}
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-536870912}
+      - MIN_FREE_DISK_BYTES=${MIN_FREE_DISK_BYTES:-2147483648}
+      - JOB_RETENTION_SECONDS=${JOB_RETENTION_SECONDS:-7200}
+      - AUDIO_RETENTION_SECONDS=${AUDIO_RETENTION_SECONDS:-1800}
+      - HF_HOME=/cache
+    volumes:
+      - hf-cache:/cache
+    tmpfs:
+      - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:

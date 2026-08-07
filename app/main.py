@@ -28,6 +28,7 @@ from app.transcriber import (
     load_model, transcribe_audio, get_progress, get_loaded_models,
     get_crisper_backend_info, _device_info,
 )
+from app.remote import should_dispatch, transcribe_remote
 
 logging.basicConfig(
     level=logging.INFO,
@@ -427,6 +428,26 @@ def _cleanup_stale_chunks(max_age_seconds: int = 1800):
             pass
 
 
+async def _transcribe_with_remote_fallback(
+    file_path: str, lang: str, job_id: str, model: str, mode: str,
+) -> dict:
+    """Transcribe a job, preferring a GPU worker when configured and reachable.
+
+    Falls back to local CPU transcription whenever remote dispatch is not
+    configured for the model or every worker fails, so a job always completes
+    through the normal flow (status.json, retention, /j/{job_id}) either way.
+    """
+    if should_dispatch(model):
+        try:
+            return await transcribe_remote(str(file_path), lang, model, mode, job_id)
+        except Exception as e:
+            logger.warning(
+                "GPU worker dispatch failed for job %s (%s); transcribing locally on CPU",
+                job_id, e,
+            )
+    return await transcribe_audio(str(file_path), lang, job_id, model_name=model, mode=mode)
+
+
 @app.post("/api/upload/start")
 async def upload_start(
     filename: str = Form(...),
@@ -695,7 +716,7 @@ async def upload_finish(
 
         async def _run_transcription():
             try:
-                result = await transcribe_audio(str(file_path), lang, job_id, model_name=chosen_model, mode=chosen_mode)
+                result = await _transcribe_with_remote_fallback(str(file_path), lang, job_id, chosen_model, chosen_mode)
                 logger.info(
                     "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
                     job_id, len(result.get("segments", [])),
@@ -894,7 +915,7 @@ async def transcribe(
 
     async def _run_transcribe():
         try:
-            result = await transcribe_audio(str(file_path), lang, job_id, model_name=chosen_model, mode=chosen_mode)
+            result = await _transcribe_with_remote_fallback(str(file_path), lang, job_id, chosen_model, chosen_mode)
             logger.info(
                 "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
                 job_id, len(result.get("segments", [])),

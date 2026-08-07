@@ -3,6 +3,7 @@ uvicorn[standard]==0.30.0
 python-multipart==0.0.9
 aiofiles==24.1.0
 pydantic==2.9.0
+httpx==0.28.1
 faster-whisper==1.2.1
 # CrisperWhisper 2.0 verbatim ASR (models: nyralabs/CrisperWhisper2.0_{large,turbo,medium,small}).
 # Uses the pure-PyTorch backend on purpose: the [ct2] extra conflicts with
