@@ -1,14 +1,14 @@
-# Deploy on orc (Oracle A1 ARM VPS)
+# Deploy on an ARM64 VPS
 
-This guide covers deploying whisper-stt-web-app on `ubuntu@orc-4cpu.lak.nz` — an
-**Oracle A1** ARM instance with **no NVIDIA GPU**, ~24 GB RAM, and tight disk
+This guide covers deploying whisper-stt-web-app on a CPU-only ARM64 VPS — an
+**Oracle A1**-class ARM instance with **no NVIDIA GPU**, ~24 GB RAM, and tight disk
 (~17 GB free, 91% used).
 
 ## Host environment
 
 | Property | Value |
 |----------|-------|
-| CPU | ARM (Oracle A1, 4 cores) |
+| CPU | ARM64 (4 cores) |
 | RAM | ~24 GB |
 | Disk | ~17 GB free (91% used) |
 | GPU | None |
@@ -136,7 +136,7 @@ git pull
 docker compose up -d --build
 ```
 
-## GPU deployment (not applicable to orc)
+## GPU deployment (not applicable to this host)
 
 On a GPU-equipped host, use the GPU override:
 ```bash

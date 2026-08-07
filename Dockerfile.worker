@@ -8,9 +8,9 @@
 # laptop2) and then runs the same whisper-stt app as a localhost-only worker.
 #
 # torch/crisperwhisper are deliberately EXCLUDED (CPU-only torch backend,
-# ~2.5 GB of build) — crisperwhisper-* model jobs stay on the VPS in
-# automatic mode. The worker's /health still reports device=cuda so the node
-# picker shows "Laptop 1 (GPU)".
+# ~2.5 GB of build) — crisperwhisper-* model jobs are not dispatched to
+# workers in automatic mode. The worker's /health still reports device=cuda
+# so the node picker shows "GPU Node A (GPU)".
 
 # --- Builder: compile CTranslate2 4.8.1 for the target GPU arch -----------
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder

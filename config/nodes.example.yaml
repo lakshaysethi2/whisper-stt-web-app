@@ -1,0 +1,17 @@
+# Transcription node configuration (deployment-specific, gitignored).
+#
+# Copy to config/nodes.yaml on the main deployment and list every GPU worker
+# the app may dispatch jobs to. `name` is shown in the node picker and on
+# job status — keep it neutral (no machine names). `url` is how the main app
+# reaches the worker (e.g. a reverse tunnel bound on the docker bridge
+# gateway, reachable as host.docker.internal:<port> from inside the app
+# container).
+#
+# When config/nodes.yaml is absent the app falls back to the legacy
+# WHISPER_WORKER_URLS / WHISPER_WORKER_NAMES env vars.
+
+nodes:
+  - name: GPU Node A
+    url: http://host.docker.internal:8564
+  - name: GPU Node B
+    url: http://host.docker.internal:8565

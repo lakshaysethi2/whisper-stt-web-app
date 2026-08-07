@@ -10,6 +10,8 @@ node_modules/
 !test_audio/*_transcript.txt
 !test_audio/SOURCES.md
 docker-compose.override.yml
+# Deployment-specific node list (see config/nodes.example.yaml)
+config/nodes.yaml
 .testvenv/
 .venv/
 

@@ -1,30 +1,32 @@
-# GPU transcription worker for the laptop workers (audio.lak.nz estate).
+# GPU transcription worker for the GPU-node deployment pattern.
 #
 # Standalone deployment: builds and runs the app's GPU image as a worker
 # that the main deployment dispatches jobs to. No public UI — binds localhost
-# only; the VPS reaches it through a reverse SSH tunnel (see
-# docs/deploy-laptop-worker.md).
+# only; the main host reaches it through a reverse SSH tunnel (see
+# docs/deploy-worker-nodes.md).
 #
-# Usage on a laptop:
+# Usage on a worker host:
 #   docker compose -f docker-compose.worker.yml up -d --build
 #
-# Two laptops share the load: laptop1 -> VPS port 8564, laptop2 -> VPS 8565
-# (set HOST_PORT=8565 on laptop2; the tunnel maps it to the VPS port).
+# Multiple workers share the load; each binds a distinct local port
+# (HOST_PORT=8564, 8565, ...) mapped to a distinct port on the main host.
 services:
   whisper-worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
-      # GPU arch per laptop: 940MX = 5.0 (default), MX330 = 6.1 (set
-      # WORKER_CUDA_ARCH=6.1 on laptop2). The stock ctranslate2 wheel has no
-      # kernels for these GPUs, so the worker image compiles it from source.
+      # GPU arch per worker (940MX-class = 5.0 default, MX330-class = 6.1 set
+      # WORKER_CUDA_ARCH=6.1). The stock ctranslate2 wheel has no kernels for
+      # these GPUs, so the worker image compiles it from source.
       args:
         CUDA_ARCH_LIST: ${WORKER_CUDA_ARCH:-5.0}
     image: whisper-stt-web-app:worker
     ports:
       - "127.0.0.1:${HOST_PORT:-8564}:8000"
     environment:
-      # Small model: the laptop GPUs (Maxwell/Pascal, ~2-4 GB VRAM) run
+      # This host IS the GPU node — always allowed to transcribe locally.
+      - WHISPER_ALLOW_LOCAL_CPU=true
+      # Small model: the worker GPUs (Maxwell/Pascal, ~2-4 GB VRAM) run
       # float32 — medium and up would OOM. Jobs for other models arrive
       # with their own model name and are loaded on demand.
       - WHISPER_MODEL=${WHISPER_MODEL:-small}
@@ -36,8 +38,11 @@ services:
       - HF_HOME=/cache
     volumes:
       - hf-cache:/cache
+      # Deployment node list (config/nodes.yaml); workers typically have none.
+      - ./config:/app/config:ro
     tmpfs:
       - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
+    mem_limit: ${MEM_LIMIT:-6g}
     restart: unless-stopped
     deploy:
       resources:

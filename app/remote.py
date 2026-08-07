@@ -1,14 +1,14 @@
 """GPU worker dispatch for transcription jobs.
 
-When WHISPER_WORKER_URLS is set (comma-separated base URLs of reachable
-whisper worker instances, e.g. http://host.docker.internal:8564), the app
-forwards transcription jobs for GPU-friendly models to those workers and
-falls back to local CPU transcription whenever no worker is reachable or a
-worker fails. With no workers configured the app behaves exactly as before
-(always local).
+Nodes (GPU workers) come from app/nodes.py — config/nodes.yaml or the
+WHISPER_WORKER_URLS env — as a list of {name, url}. When nodes are
+configured, the app forwards transcription jobs for GPU-friendly models to
+them; whether a job falls back to local CPU transcription is governed by
+WHISPER_ALLOW_LOCAL_CPU (see app/config.py — default false on this stack).
+With no nodes configured the app behaves exactly as before (always local).
 
-Each job can also name a specific node ("Automatic", a worker name from
-WHISPER_WORKER_NAMES, or a 1-based index). A captain-chosen node is used
+Each job can also name a specific node ("Automatic", a node name, a 1-based
+index, or the built-in "CPU" node). An explicitly chosen node is used
 exclusively — if it fails, the job fails with a message naming the node
 (the caller decides that policy; see app.main).
 
@@ -24,34 +24,26 @@ import time
 
 import httpx
 
+from app.nodes import NODES, CPU_NODE
 from app.transcriber import _progress
 
 logger = logging.getLogger(__name__)
 
-# Comma-separated worker base URLs (empty = dispatch disabled, local only).
-WHISPER_WORKER_URLS = [
-    u.strip().rstrip("/")
-    for u in os.getenv("WHISPER_WORKER_URLS", "").split(",")
-    if u.strip()
-]
+# Base URLs of the configured nodes (empty = dispatch disabled, local only).
+WHISPER_WORKER_URLS = [n["url"] for n in NODES]
 
-# Display names for the workers, same order as WHISPER_WORKER_URLS.
-WHISPER_WORKER_NAMES = [
-    n.strip()
-    for n in os.getenv("WHISPER_WORKER_NAMES", "").split(",")
-    if n.strip()
-]
-while len(WHISPER_WORKER_NAMES) < len(WHISPER_WORKER_URLS):
-    WHISPER_WORKER_NAMES.append(f"Worker {len(WHISPER_WORKER_NAMES) + 1}")
+# Display names for the nodes, same order as WHISPER_WORKER_URLS.
+WHISPER_WORKER_NAMES = [n["name"] for n in NODES]
 
-# Models we may dispatch to the laptops' small-VRAM GPUs. Everything else
-# transcribes locally on CPU. The laptop GPUs (Maxwell/Pascal) run float32
-# (no fp16/int8 kernels on CC 5.0/6.1): tiny/base/small fit ~2 GB VRAM;
-# larger models would OOM the worker and waste the upload round trip.
+# Models we may dispatch to the workers' small-VRAM GPUs. The worker GPUs
+# (Maxwell/Pascal) run float32 (no fp16/int8 kernels on CC 5.0/6.1):
+# tiny/base/small fit ~2 GB VRAM; larger models would OOM the worker and
+# waste the upload round trip. CrisperWhisper needs the torch backend the
+# worker image deliberately excludes, so it is never auto-dispatched.
 # An explicitly chosen node overrides this list (see should_dispatch).
 WHISPER_GPU_MODELS = {
     m.strip()
-    for m in os.getenv("WHISPER_GPU_MODELS", "tiny,base,small,crisperwhisper-small").split(",")
+    for m in os.getenv("WHISPER_GPU_MODELS", "tiny,base,small").split(",")
     if m.strip()
 }
 
@@ -100,17 +92,19 @@ def worker_index(worker: str | None) -> int | None:
 def validate_worker(worker: str | None) -> str:
     """Validate a worker selector from a request.
 
-    Returns "auto" or the worker's display NAME. Raises HTTPException(400)
-    for an unknown name/index.
+    Returns "auto", CPU_NODE ("CPU"), or the worker's display NAME.
+    Raises HTTPException(400) for an unknown name/index.
     """
     from fastapi import HTTPException
     idx = worker_index(worker)
     if idx is None:
         return "auto"
     if idx < 0:
+        if (worker or "").strip().lower() == CPU_NODE.lower():
+            return CPU_NODE
         raise HTTPException(
             400,
-            f"Unknown node: '{worker}'. Choose Automatic or one of: "
+            f"Unknown node: '{worker}'. Choose Automatic, {CPU_NODE}, or one of: "
             + ", ".join(WHISPER_WORKER_NAMES),
         )
     return WHISPER_WORKER_NAMES[idx]
@@ -119,10 +113,13 @@ def validate_worker(worker: str | None) -> str:
 def should_dispatch(model_name: str, worker: str = "auto") -> bool:
     """True when a job should be attempted on a GPU worker.
 
-    An explicitly chosen node always routes there (the captain decides);
-    automatic dispatch only sends models that fit the laptops' VRAM.
+    An explicitly chosen node always routes there (the user decides);
+    automatic dispatch only sends models that fit the workers' VRAM. The
+    CPU_NODE selection never dispatches.
     """
     if not WHISPER_WORKER_URLS:
+        return False
+    if worker == CPU_NODE:
         return False
     if worker and worker != "auto":
         return True
@@ -140,9 +137,10 @@ def _name_for(base: str) -> str:
 
 
 def worker_label(base: str) -> str:
-    """Display label for a worker, e.g. "Laptop 2 (GPU)"."""
+    """Display label for a worker, e.g. "GPU Node B (GPU)" — device appended
+    when the worker reports a CUDA device (cached from health checks)."""
     name = _name_for(base)
-    if _worker_devices.get(base) == "cuda":
+    if _worker_devices.get(base) == "cuda" and "gpu" not in name.lower():
         return f"{name} (GPU)"
     return name
 

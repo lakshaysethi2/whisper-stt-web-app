@@ -15,7 +15,8 @@ import shutil
 import time
 
 from app.config import (
-    WHISPER_MODEL, WHISPER_LANGUAGE, MAX_FILE_SIZE,
+    WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_ALLOW_LOCAL_CPU,
+    MAX_FILE_SIZE,
     MIN_FREE_DISK_BYTES, check_disk_space,
     ALLOWED_EXTENSIONS, SUPPORTED_MODELS, UI_MODEL_CHOICES,
     validate_model, validate_mode,
@@ -28,6 +29,7 @@ from app.transcriber import (
     load_model, transcribe_audio, get_progress, get_loaded_models,
     get_crisper_backend_info, _device_info,
 )
+from app.nodes import CPU_NODE
 from app.remote import (
     should_dispatch, transcribe_remote, validate_worker, worker_statuses,
 )
@@ -345,6 +347,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Whisper STT", version="3.0.0", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """The page and its assets are tiny and change on every deploy — don't let
+    edge caches (Cloudflare) serve a stale picker/JS to users."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/") or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -407,18 +420,31 @@ async def upload_config():
     }
 
 
+@app.get("/api/nodes")
+async def nodes():
+    """Node picker data: every configured GPU worker with live online status,
+    plus whether local CPU transcription is allowed.
+
+    Additive endpoint for the frontend; returns an empty list when no nodes
+    are configured (the site then always transcribes locally).
+    """
+    statuses = await worker_statuses()
+    return {
+        "nodes": statuses,
+        "automatic": bool(statuses),
+        "cpu": {"label": CPU_NODE, "enabled": WHISPER_ALLOW_LOCAL_CPU},
+        "allow_local_cpu": WHISPER_ALLOW_LOCAL_CPU,
+    }
+
+
 @app.get("/api/workers")
 async def workers():
-    """Node picker data: every configured GPU worker with live online status.
-
-    Additive endpoint for the frontend; returns an empty list when no workers
-    are configured (the site then always transcribes on this server).
-    """
+    """Back-compat alias of /api/nodes (same worker list)."""
     statuses = await worker_statuses()
     return {
         "workers": statuses,
         "automatic": bool(statuses),
-        "server_node": "server (CPU)",
+        "server_node": CPU_NODE,
     }
 
 
@@ -453,20 +479,37 @@ async def _set_job_live(job_id: str, **fields) -> None:
             j.update(fields)
 
 
+NO_NODE_ERROR = "No transcription node available — try again later."
+
+
+def _no_node_error(model: str, worker: str) -> str:
+    """Clean failure message when a job cannot run on any node."""
+    if worker == CPU_NODE:
+        return f"{CPU_NODE} transcription is disabled on this deployment."
+    if not should_dispatch(model, worker):
+        return (
+            f"Model '{model}' cannot run on any available GPU node and "
+            f"{CPU_NODE} transcription is disabled. Try a model that fits "
+            "the GPU nodes (tiny, base, small)."
+        )
+    return NO_NODE_ERROR
+
+
 async def _transcribe_with_remote_fallback(
     file_path: str, lang: str, job_id: str, model: str, mode: str, worker: str = "auto",
 ) -> dict:
     """Transcribe a job, preferring a GPU worker when configured and reachable.
 
-    Automatic mode falls back to local CPU transcription whenever remote
-    dispatch is not configured for the model or every worker fails, so a job
-    always completes through the normal flow (status.json, retention,
-    /j/{job_id}) either way. An explicitly chosen node is used exclusively:
-    if it fails, the job FAILS with a message naming the node and the retry
-    path — never a silent switch to a node the captain did not choose.
+    Automatic mode falls back to local CPU transcription ONLY when
+    WHISPER_ALLOW_LOCAL_CPU is true; otherwise the job fails cleanly with
+    "No transcription node available" when dispatch is not possible or every
+    worker fails — the main host's CPU is never used without explicit opt-in.
+    An explicitly chosen node is used exclusively: if it fails, the job
+    FAILS with a message naming the node and the retry path — never a silent
+    switch to a node the user did not choose.
 
     The job dict's live `node`/`stage` fields are updated so the status
-    endpoint and frontend can show "Processing on Laptop 2 (GPU)" etc.
+    endpoint and frontend can show "Processing on GPU Node B (GPU)" etc.
     """
     async def _update(stage: str, node: str) -> None:
         await _set_job_live(job_id, stage=stage, node=node)
@@ -483,10 +526,14 @@ async def _transcribe_with_remote_fallback(
                     f"Node {worker} failed: {e}. Retry or choose another node."
                 ) from e
             logger.warning(
-                "GPU worker dispatch failed for job %s (%s); transcribing locally on CPU",
-                job_id, e,
+                "GPU worker dispatch failed for job %s (%s); allow_local_cpu=%s",
+                job_id, e, WHISPER_ALLOW_LOCAL_CPU,
             )
-    await _set_job_live(job_id, stage="transcribing", node="server (CPU)")
+            if not WHISPER_ALLOW_LOCAL_CPU:
+                raise RuntimeError(NO_NODE_ERROR) from e
+    elif not WHISPER_ALLOW_LOCAL_CPU:
+        raise RuntimeError(_no_node_error(model, worker))
+    await _set_job_live(job_id, stage="transcribing", node=CPU_NODE)
     return await transcribe_audio(str(file_path), lang, job_id, model_name=model, mode=mode)
 
 
@@ -850,9 +897,9 @@ async def transcribe_status(job_id: str):
         "job_id": job_id,
         "status": job["status"],
         "elapsed_seconds": round(elapsed, 1),
-        # Which node is (or was) handling this job, e.g. "Laptop 2 (GPU)"
-        # or "server (CPU)" — and the job stage (uploaded/dispatched/
-        # transcribing/done/failed) for the frontend's live status line.
+        # Which node is (or was) handling this job, e.g. "GPU Node B (GPU)"
+        # or "CPU" — and the job stage (uploaded/dispatched/transcribing/
+        # done/failed) for the frontend's live status line.
         "node": job.get("node"),
         "stage": job.get("stage"),
         # Honest expiry: transcripts are kept for JOB_RETENTION_SECONDS.
@@ -889,9 +936,7 @@ async def transcribe_status(job_id: str):
     # Fill display defaults for jobs created before node/stage existed or
     # restored from disk without them.
     if response.get("node") is None:
-        response["node"] = (
-            "server (CPU)" if job["status"] in ("completed", "failed") else "waiting"
-        )
+        response["node"] = "CPU" if job["status"] in ("completed", "failed") else "waiting"
     if response.get("stage") is None:
         response["stage"] = (
             "done" if job["status"] == "completed" else job["status"]

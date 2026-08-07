@@ -10,6 +10,15 @@ logger = logging.getLogger(__name__)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 
+# Captain rule: GPU-node deployments must never transcribe on the main host's
+# CPU (an ARM VPS CPU job once OOM-crashed the host). When this is false the
+# dispatch layer refuses local transcription: jobs fail cleanly with "No
+# transcription node available" when no GPU node can take them, instead of
+# silently falling back to CPU. Set true for plain CPU-only single-host
+# deployments (the docker-compose.yml default keeps the public quick start
+# working).
+WHISPER_ALLOW_LOCAL_CPU = os.getenv("WHISPER_ALLOW_LOCAL_CPU", "false").strip().lower() in ("1", "true", "yes", "on")
+
 # --- CrisperWhisper 2.0 (verbatim ASR) ---
 # Backend selection for CrisperWhisper models: "auto" (prefer ct2 when the
 # crisperwhisper[ct2] extra is installed, else transformers), "ct2", or
@@ -17,7 +26,7 @@ WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 # NOTE: on this stack the [ct2] extra cannot be used alongside faster-whisper
 # (faster-whisper depends on upstream ctranslate2, which overwrites the
 # ctranslate2-crisperwhisper fork's files) and its wheels are Linux x86_64
-# only (audio.lak.nz is ARM64), so "auto" resolves to transformers here.
+# only (not installable on the reference ARM64 host), so "auto" resolves to transformers here.
 CRISPER_BACKEND = os.getenv("CRISPER_BACKEND", "auto").strip().lower()
 # Default transcription mode for CrisperWhisper models when a request does not
 # specify one. "verbatim" preserves fillers/stutters; "intended" is clean text.
@@ -32,7 +41,7 @@ CRISPER_MODEL_IDS = {
     "crisperwhisper-medium": "nyralabs/CrisperWhisper2.0_medium",
     "crisperwhisper-small": "nyralabs/CrisperWhisper2.0_small",
 }
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "536870912"))   # 512 MB (default; safer for tight-disk VPS)
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "536870912"))   # 512 MB (default; safer for tight-disk hosts)
 # Minimum free bytes in WORK_DIR before uploads are rejected. Must be well
 # below the default tmpfs work-dir size (2 GB) or the check trips as soon as
 # a single job dir exists.

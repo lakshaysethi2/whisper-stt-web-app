@@ -699,6 +699,12 @@ select.input-error {
   transform: scale(0.98);
 }
 
+.node-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .node-pill.active {
   border-color: var(--primary);
   background: color-mix(in srgb, var(--primary) 12%, var(--bg-input));
@@ -722,6 +728,14 @@ select.input-error {
 .node-dot-on {
   background: var(--success);
   box-shadow: 0 0 4px color-mix(in srgb, var(--success) 60%, transparent);
+}
+
+.node-dot-auto {
+  background: var(--primary);
+}
+
+.node-dot-cpu {
+  background: #888;
 }
 
 .node-dot-off {

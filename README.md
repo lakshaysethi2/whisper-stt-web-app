@@ -79,6 +79,25 @@ The GPU override:
 - Builds from the CUDA-enabled `Dockerfile` (nvidia/cuda base)
 - Sets `WHISPER_MODEL=large-v3-turbo` for best quality
 - Adds NVIDIA GPU device reservation
+- Always allows local transcription (this host has the GPU)
+
+### GPU worker nodes (dispatch)
+
+A main host without a GPU can dispatch jobs to GPU workers running this same
+app on other machines. Workers are listed in `config/nodes.yaml` (see
+`config/nodes.example.yaml`; `WHISPER_WORKER_URLS`/`WHISPER_WORKER_NAMES`
+env vars are the legacy form). See
+[docs/deploy-worker-nodes.md](docs/deploy-worker-nodes.md) for the full
+worker + reverse-tunnel setup.
+
+- **No CPU fallback by default**: `WHISPER_ALLOW_LOCAL_CPU=false` (default)
+  means a job no node can take fails cleanly with "No transcription node
+  available" instead of running on the main host's CPU. Set it `true` only
+  for plain CPU-only single-host deployments.
+- Auto-dispatch only sends models that fit the workers' VRAM
+  (`WHISPER_GPU_MODELS`, default `tiny,base,small`); the node picker and a
+  `worker` request param can also target a specific node or the built-in
+  `CPU` node.
 
 ## Configuration
 
@@ -147,10 +166,10 @@ Users must **explicitly choose** a model before transcribing. The UI offers two 
 
 - This app installs `crisperwhisper[transformers]` (pure PyTorch) **on purpose**:
   - The `[ct2]` extra conflicts with faster-whisper — faster-whisper depends on upstream `ctranslate2`, which overwrites the `ctranslate2-crisperwhisper` fork's files in site-packages.
-  - The `[ct2]` wheels are Linux **x86_64 only**; audio.lak.nz is ARM64, so the transformers backend is the only installable option there.
+  - The `[ct2]` wheels are Linux **x86_64 only**; the reference ARM64 host cannot install them, so the transformers backend is the only option there.
 - `CRISPER_BACKEND=auto` (default) picks the ct2 fork only when it is actually installed (`ctranslate2-crisperwhisper` distribution present); otherwise it uses transformers. To force a backend, set `CRISPER_BACKEND=ct2|transformers`.
 - The transformers backend runs on CPU with fp32 (best speed on ARM) and on CUDA with fp16. It loads with eager attention (required for word-timing cross-attention), so it is slower than the ct2 runtime (~4-5x difference on GPU) but fully functional: verbatim/intended, word timestamps, longform and hallucination repair all work.
-- On the live CPU-only host, expect roughly realtime-factor 0.4 on `crisperwhisper-small` (measured on a 4-core ARM64 Oracle A1); larger models are proportionally slower. CrisperWhisper jobs show "working, progress unknown" in the UI because the library does not expose incremental progress.
+- On a CPU-only host, expect roughly realtime-factor 0.4 on `crisperwhisper-small` (measured on a 4-core ARM64 Oracle A1); larger models are proportionally slower. CrisperWhisper jobs show "working, progress unknown" in the UI because the library does not expose incremental progress.
 
 ### Model downloads & disk
 

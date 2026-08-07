@@ -50,9 +50,10 @@
     resultNode: $("#result-node"),
   };
 
-  // Node picker state: "auto" or the chosen worker's display NAME.
+  // Node picker state: "auto", a node's display NAME, or "CPU".
   let selectedNode = "auto";
   let workerList = [];
+  let allowLocalCpu = true; // refreshed from /api/nodes; true for old backends
 
   const uploadConfig = {
     chunkSize: 5 * 1024 * 1024,
@@ -135,10 +136,13 @@
 
   async function refreshWorkers() {
     try {
-      const r = await fetch("/api/workers");
+      let r = await fetch("/api/nodes");
+      if (!r.ok) r = await fetch("/api/workers"); // old backend
       if (!r.ok) return;
       const data = await r.json();
-      workerList = data.workers || [];
+      workerList = data.nodes || data.workers || [];
+      if (typeof data.allow_local_cpu === "boolean") allowLocalCpu = data.allow_local_cpu;
+      else if (data.cpu) allowLocalCpu = data.cpu.enabled !== false;
       renderNodePicker();
     } catch {}
   }
@@ -150,11 +154,12 @@
 
     // Keep the current selection if the node still exists.
     const stillThere = workerList.some((w) => w.name === selectedNode);
-    if (selectedNode !== "auto" && !stillThere) selectedNode = "auto";
+    if (selectedNode !== "auto" && selectedNode !== "CPU" && !stillThere) selectedNode = "auto";
+    if (selectedNode === "CPU" && !allowLocalCpu) selectedNode = "auto";
 
     const pills = [
       `<button type="button" class="node-pill${selectedNode === "auto" ? " active" : ""}" data-node="auto">` +
-        `<span class="node-dot node-dot-auto"></span>Automatic<span class="node-sub">best available</span></button>`,
+        `<span class="node-dot node-dot-auto"></span>Automatic<span class="node-sub">recommended</span></button>`,
     ];
     workerList.forEach((w) => {
       const cls = selectedNode === w.name ? " active" : "";
@@ -165,13 +170,20 @@
           `<span class="node-dot ${dot}"></span>${escapeHtml(w.name)}<span class="node-sub">${sub}</span></button>`
       );
     });
+    const cpuCls = selectedNode === "CPU" ? " active" : "";
+    const cpuSub = allowLocalCpu ? "this machine" : "disabled";
+    pills.push(
+      `<button type="button" class="node-pill${cpuCls}" data-node="CPU"${allowLocalCpu ? "" : " disabled"}>` +
+        `<span class="node-dot node-dot-cpu"></span>CPU<span class="node-sub">${cpuSub}</span></button>`
+    );
     els.nodePicker.innerHTML = pills.join("");
 
     els.nodePicker.querySelectorAll(".node-pill").forEach((btn) => {
       btn.addEventListener("click", () => {
+        if (btn.disabled) return;
         selectedNode = btn.dataset.node;
         els.nodePicker.querySelectorAll(".node-pill").forEach((b) => b.classList.toggle("active", b === btn));
-        refreshWorkers(); // re-check availability right when the captain taps
+        refreshWorkers(); // re-check availability right when the user taps
       });
     });
 
@@ -181,12 +193,19 @@
         const names = offline.map((w) => w.name).join(", ");
         els.nodeBanner.textContent =
           workerList.length === offline.length
-            ? `No GPU nodes are online — jobs will run on the server (CPU).`
-            : `${names} ${offline.length === 1 ? "is" : "are"} offline — jobs will run on the server or another node.`;
+            ? (allowLocalCpu
+                ? "No GPU nodes are online — jobs will run on CPU."
+                : "No GPU nodes are online — jobs will fail until a node is available.")
+            : `${names} ${offline.length === 1 ? "is" : "are"} offline — jobs use the online nodes.`;
         els.nodeBanner.classList.remove("hidden");
       } else {
         els.nodeBanner.classList.add("hidden");
       }
+    }
+    if (els.nodeHint) {
+      els.nodeHint.textContent = allowLocalCpu
+        ? "Automatic sends the job to a reachable GPU node, or CPU if none are online."
+        : "Automatic sends the job to a reachable GPU node. CPU transcription is disabled.";
     }
   }
 
@@ -639,7 +658,7 @@
 
   // Shared polling after job creation (used by both directUpload and chunkedUpload)
   // Human-readable status line from a job status payload, showing the node
-  // and stage: "Processing on Laptop 2 (GPU) — transcribing (37%)".
+  // and stage: "Processing on GPU Node B (GPU) — transcribing (37%)".
   function statusMessage(status) {
     const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
     const node = status.node || "waiting";
