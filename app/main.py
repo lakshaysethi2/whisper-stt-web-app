@@ -368,6 +368,11 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+@app.get("/changelog")
+async def changelog():
+    return FileResponse("static/changelog.html")
+
+
 @app.get("/")
 async def index():
     return FileResponse("static/index.html")

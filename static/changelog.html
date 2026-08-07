@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0a0e1a">
+  <title>Changelog — Whisper STT</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <a href="/" style="display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit">
+        <div class="logo-icon">⚡</div>
+        <h1>Whisper STT</h1>
+      </a>
+    </div>
+    <div class="header-right">
+      <a class="btn btn-outline btn-sm" href="/">Transcribe</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="card">
+      <div class="card-label">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        Changelog
+      </div>
+      <p class="changelog-intro">Dated changes deployed to <a href="https://audio.lak.nz/">audio.lak.nz</a>. Newest first.</p>
+
+      <div class="changelog-list">
+
+        <div class="changelog-entry">
+          <div class="changelog-date">2026-08-08</div>
+          <ul>
+            <li><strong>Parakeet TDT 0.6B v3</strong> — added as a selectable model (<code>parakeet-tdt-0.6b-v3</code> → <code>nvidia/parakeet-tdt-0.6b-v3</code>). FastConformer-TDT, 25 EU languages auto-detect, punctuation/casing, word+segment timestamps. Runs via <code>transformers</code> (shares torch stack with CrisperWhisper); optional at boot — shows "Parakeet unavailable" when not installed.</li>
+            <li><strong>GPU Node B — librosa fix</strong> — worker image was missing <code>librosa</code> + <code>soundfile</code> required by Parakeet (and CrisperWhisper container decode). Parakeet jobs on Node B failed until the deps were added. Fixed.</li>
+            <li><strong>CrisperWhisper CPU fallback on Maxwell/Pascal</strong> — torch CUDA 13 ships no sm_50 kernels; CrisperWhisper now falls back to CPU on those GPUs instead of crashing.</li>
+          </ul>
+        </div>
+
+        <div class="changelog-entry">
+          <div class="changelog-date">2026-08-07</div>
+          <ul>
+            <li><strong>GPU worker dispatch</strong> — transcription can be dispatched to laptop GPU workers (config via <code>config/nodes.yaml</code>, round-robin). Frontend <em>Transcription node</em> picker: Automatic / GPU Node A / GPU Node B / CPU, with live online/offline status and neutral labels. Explicit node choice is exclusive — failure fails the job with a named-node error, never a silent switch.</li>
+            <li><strong>No main-host CPU transcription by default</strong> — <code>WHISPER_ALLOW_LOCAL_CPU=false</code> (default) — undispatchable jobs fail cleanly ("No transcription node available") instead of running on the VPS CPU (a prior CPU job OOM-crashed the host).</li>
+            <li><strong>Worker image (Dockerfile.worker)</strong> — CTranslate2 v4.8.1 built from source for sm_50/sm_61 (pip wheel only ships sm_86/90/100), with reverse-tunnel networking (<code>10.99.0.1</code> + <code>host.docker.internal</code>).</li>
+            <li><strong>Reliability</strong> — completed/failed jobs keep <code>stage=done</code> + live <code>node</code> so results show which node ran the job; <code>MIN_FREE_DISK_BYTES</code> default lowered to 512 MB so the 2 GB tmpfs work dir no longer rejects every upload.</li>
+          </ul>
+        </div>
+
+        <div class="changelog-entry">
+          <div class="changelog-date">2026-08-03</div>
+          <ul>
+            <li><strong>CrisperWhisper 2.0 (verbatim ASR)</strong> — optional models <code>crisperwhisper-large/turbo/medium/small</code> (HF: <code>nyralabs/CrisperWhisper2.0_*</code>). Verbatim vs intended mode per job, word-level timestamps, single-thread executor, ffmpeg pre-decode for container audio (e.g. MP4). Backend auto-resolves to transformers on this stack (ct2 extra conflicts with faster-whisper and has no ARM64 wheels).</li>
+            <li><strong>Split retention</strong> — transcripts kept 1 week (<code>JOB_RETENTION_SECONDS=604800</code>, ≥1h required), recordings deleted sooner (30 min) and immediately on completion; status endpoint now returns <code>retention_seconds/expires_at/expires_in_seconds</code>. Interrupted jobs restored as "interrupted" after restart (never 404) with re-upload guidance.</li>
+          </ul>
+        </div>
+
+        <div class="changelog-entry">
+          <div class="changelog-date">2026-08-01</div>
+          <ul>
+            <li><strong>Mandatory model choice</strong> — no silent default; users must pick a model before transcribing (400 if missing). Save-link with copyable <code>/j/{job_id}</code>, resume views for interrupted/expired jobs, and browser-STT links.</li>
+          </ul>
+        </div>
+
+        <div class="changelog-entry">
+          <div class="changelog-date">2026-06-22</div>
+          <ul>
+            <li><strong>Chunked upload</strong> — bypasses Cloudflare 100 MB limit (5 MB chunks, finish returns <code>job_id</code> immediately, poll <code>/api/transcribe/status/{job_id}</code>). Also: job IDs are full 32-char uuid4 hex; jobs persisted to <code>WORK_DIR/&lt;id&gt;/status.json</code> for resume.</li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <a href="/">← Back to transcription</a>
+    <span>·</span>
+    <a href="/changelog">Changelog</a>
+  </footer>
+</body>
+</html>
