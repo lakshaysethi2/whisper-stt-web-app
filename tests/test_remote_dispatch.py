@@ -131,6 +131,48 @@ def test_should_dispatch_only_gpu_models():
         assert remote.should_dispatch("large-v3-turbo") is False
 
 
+# ---------------------------------------------------------------------------
+# Worker selectors
+# ---------------------------------------------------------------------------
+
+
+def test_validate_worker_auto_and_names():
+    from fastapi import HTTPException
+    with patch.object(remote, "WHISPER_WORKER_URLS", ["http://a:1", "http://b:2"]), \
+         patch.object(remote, "WHISPER_WORKER_NAMES", ["Laptop 1", "Laptop 2"]):
+        assert remote.validate_worker("") == "auto"
+        assert remote.validate_worker(None) == "auto"
+        assert remote.validate_worker("auto") == "auto"
+        assert remote.validate_worker("AUTO") == "auto"
+        assert remote.validate_worker("Laptop 1") == "Laptop 1"
+        assert remote.validate_worker("laptop 2") == "Laptop 2"  # case-insensitive
+        assert remote.validate_worker("1") == "Laptop 1"  # 1-based index
+        assert remote.validate_worker("2") == "Laptop 2"
+        try:
+            remote.validate_worker("Mars")
+            assert False, "expected 400"
+        except HTTPException as e:
+            assert e.status_code == 400
+        try:
+            remote.validate_worker("3")
+            assert False, "expected 400"
+        except HTTPException as e:
+            assert e.status_code == 400
+
+
+def test_should_dispatch_explicit_node_overrides_model_whitelist():
+    with patch.object(remote, "WHISPER_WORKER_URLS", ["http://w:8564"]), \
+         patch.object(remote, "WHISPER_GPU_MODELS", {"tiny", "base"}):
+        # Automatic: only whitelisted models are dispatched.
+        assert remote.should_dispatch("base") is True
+        assert remote.should_dispatch("large-v3-turbo") is False
+        # Explicit node: the captain chose it — route there whatever the model.
+        assert remote.should_dispatch("large-v3-turbo", worker="Laptop 1") is True
+        # No workers configured: never dispatch.
+        with patch.object(remote, "WHISPER_WORKER_URLS", []):
+            assert remote.should_dispatch("base", worker="Laptop 1") is False
+
+
 def test_worker_order_round_robin():
     with patch.object(remote, "WHISPER_WORKER_URLS", ["a", "b", "c"]):
         remote._round_robin_index = 0
@@ -198,6 +240,54 @@ def test_transcribe_remote_raises_when_worker_goes_down(tmp_path):
             pass
 
 
+def test_transcribe_remote_explicit_node_only(tmp_path):
+    """An explicit node is used exclusively: a healthy other node must NOT be
+    used instead."""
+    up = _FakeWorker()                    # healthy worker
+    transport = _transport_for(up)        # only worker0 exists
+    # Choose worker1 (not in the transport) explicitly -> must fail, even
+    # though worker0 is healthy.
+    with patch.object(remote, "WHISPER_WORKER_URLS", ["http://worker0:8000", "http://worker1:8001"]), \
+         patch.object(remote, "WHISPER_WORKER_NAMES", ["Laptop 1", "Laptop 2"]):
+        try:
+            asyncio.run(remote.transcribe_remote(
+                _audio_file(tmp_path), "en", "small", "verbatim", "j" * 32,
+                worker="Laptop 2", _transport=transport,
+            ))
+            assert False, "expected RemoteTranscriptionError"
+        except remote.RemoteTranscriptionError as e:
+            assert "Laptop 2" in str(e)
+        # Explicit healthy node succeeds.
+        result = asyncio.run(remote.transcribe_remote(
+            _audio_file(tmp_path), "en", "small", "verbatim", "j" * 32,
+            worker="Laptop 1", _transport=transport,
+        ))
+        assert result["id"] == "j" * 32
+
+
+def test_workers_endpoint_reports_online_offline():
+    from unittest.mock import AsyncMock
+    expected = [
+        {"name": "Laptop 1", "url": "http://worker0:8000", "online": True, "device": "cuda"},
+        {"name": "Laptop 2", "url": "http://worker1:8001", "online": False, "device": None},
+    ]
+    with patch("app.main.worker_statuses", new=AsyncMock(return_value=expected)):
+        r = client.get("/api/workers")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["automatic"] is True
+        assert data["workers"] == expected
+
+
+def test_workers_endpoint_empty_without_workers():
+    with patch.object(remote, "WHISPER_WORKER_URLS", []):
+        r = client.get("/api/workers")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["workers"] == []
+        assert data["automatic"] is False
+
+
 # ---------------------------------------------------------------------------
 # Integration: job lifecycle with dispatch + fallback
 # ---------------------------------------------------------------------------
@@ -219,7 +309,7 @@ def test_job_completes_through_remote_when_dispatched():
 
 
 def test_job_falls_back_to_local_when_worker_fails():
-    """Remote dispatch raising must not fail the job — local CPU takes over."""
+    """Automatic dispatch raising must not fail the job — local CPU takes over."""
     with patch("app.main.should_dispatch", return_value=True), \
          patch("app.main.transcribe_remote",
                side_effect=_make_raise_async_mock(remote.RemoteTranscriptionError("all down"))), \
@@ -235,6 +325,53 @@ def test_job_falls_back_to_local_when_worker_fails():
         st = _wait_for_status(job_id, ("completed", "failed"))
         assert st and st["status"] == "completed"
         assert st["result"]["text"] == "local fallback result"
+        # The status surfaced the fallback node.
+        assert st["node"] == "server (CPU)"
+
+
+def test_job_fails_with_named_error_for_explicit_node():
+    """A captain-chosen node that fails FAILS the job with a named message —
+    no silent fallback to another node or the server."""
+    with patch.object(remote, "WHISPER_WORKER_URLS", ["http://w1:8564", "http://w2:8565"]), \
+         patch.object(remote, "WHISPER_WORKER_NAMES", ["Laptop 1", "Laptop 2"]), \
+         patch("app.main.should_dispatch", return_value=True), \
+         patch("app.main.transcribe_remote",
+               side_effect=_make_raise_async_mock(
+                   remote.RemoteTranscriptionError("Laptop 2 (GPU) is unreachable"))), \
+         patch("app.main.transcribe_audio", side_effect=_make_async_mock({
+             "id": "x", "text": "should not be used", "language": "en",
+             "device": "cpu", "segments": [], "duration": 0.0, "process_time": 0.1,
+         })):
+        r = client.post("/api/transcribe",
+                        files={"file": ("a.wav", b"\x00" * 16, "audio/wav")},
+                        data={"language": "en", "model": "base", "mode": "verbatim",
+                              "worker": "Laptop 2"})
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        st = _wait_for_status(job_id, ("completed", "failed"))
+        assert st and st["status"] == "failed"
+        assert "Laptop 2" in st["error"]
+        assert "Retry or choose another node" in st["error"]
+
+
+def test_status_reports_worker_param_and_stage():
+    with patch.object(remote, "WHISPER_WORKER_URLS", ["http://w1:8564"]), \
+         patch.object(remote, "WHISPER_WORKER_NAMES", ["Laptop 1"]), \
+         patch("app.main.should_dispatch", return_value=False), \
+         patch("app.main.transcribe_audio", side_effect=_make_async_mock({
+             "id": "x", "text": "local", "language": "en",
+             "device": "cpu", "segments": [], "duration": 0.0, "process_time": 0.1,
+         })):
+        r = client.post("/api/transcribe",
+                        files={"file": ("a.wav", b"\x00" * 16, "audio/wav")},
+                        data={"language": "en", "model": "base", "mode": "verbatim",
+                              "worker": "Laptop 1"})
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        st = _wait_for_status(job_id, ("completed", "failed"))
+        assert st and st["status"] == "completed"
+        assert st["stage"] == "done"
+        assert st["node"] == "server (CPU)"
 
 
 def test_job_local_path_when_model_not_dispatched():

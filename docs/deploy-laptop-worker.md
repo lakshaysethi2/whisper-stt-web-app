@@ -30,6 +30,10 @@ browser → audio.lak.nz (Cloudflare) → VPS whisper-web (8561, CPU fallback)
   there (no fp16/int8 kernels), so `medium` and larger would OOM — they are
   excluded and transcribe locally as before. Large models requested by the
   user therefore always fall back to VPS CPU.
+- The user can also choose a specific node per job (node picker on the page,
+  or a `worker` param — a name from `WHISPER_WORKER_NAMES` or a 1-based
+  index). A chosen node is used exclusively: if it fails, the job fails with
+  a message naming the node, rather than silently running somewhere else.
 - Fallback is automatic and total: if every worker is unreachable, fails the
   health check, rejects the upload, fails the job, or stops responding while
   polling, the VPS transcribes the job locally on CPU. The user never sees an
