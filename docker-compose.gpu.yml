@@ -11,6 +11,9 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - WHISPER_MODEL=${WHISPER_MODEL:-large-v3-turbo}
+      # This host has the GPU itself — local transcription runs on CUDA, so
+      # it is always allowed (the no-CPU rule targets CPU-only main hosts).
+      - WHISPER_ALLOW_LOCAL_CPU=true
     deploy:
       resources:
         reservations:
