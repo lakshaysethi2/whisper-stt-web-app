@@ -827,9 +827,10 @@ async def upload_finish(
                         "model": chosen_model,
                         "mode": chosen_mode,
                         "created_at": created_at,
-                        # Keep the live node/stage fields set during dispatch
-                        # so the result page shows which node ran the job.
-                        **{k: _jobs[job_id][k] for k in ("node", "stage", "worker") if k in _jobs[job_id]},
+                        "stage": "done",
+                        # Keep the live node field set during dispatch so the
+                        # result page shows which node ran the job.
+                        **{k: _jobs[job_id][k] for k in ("node", "worker") if k in _jobs[job_id]},
                     }
                 _persist_job(job_id, _jobs[job_id])
             except Exception as e:
@@ -1049,7 +1050,10 @@ async def transcribe(
                     "model": chosen_model,
                     "mode": chosen_mode,
                     "created_at": prev["created_at"],
-                    **{k: prev[k] for k in ("node", "stage", "worker") if k in prev},
+                    "stage": "done",
+                    # Keep the live node field set during dispatch so the
+                    # result page shows which node ran the job.
+                    **{k: prev[k] for k in ("node", "worker") if k in prev},
                 }
             _persist_job(job_id, _jobs[job_id])
         except Exception as e:
