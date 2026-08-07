@@ -118,7 +118,7 @@ Previously the UI silently used the server's WHISPER_MODEL default. Users had no
 ## CrisperWhisper 2.0 (Verbatim ASR)
 
 ### Problem
-audio.lak.nz should also support verbatim speech-to-text — transcribing exactly what was said (fillers, repeats, stutters) with word-level timestamps — not just the clean Whisper-style transcripts faster-whisper produces.
+The live site should also support verbatim speech-to-text — transcribing exactly what was said (fillers, repeats, stutters) with word-level timestamps — not just the clean Whisper-style transcripts faster-whisper produces.
 
 ### Requirements
 1. **New model family** alongside faster-whisper (do not remove faster-whisper): `crisperwhisper-large/turbo/medium/small` in `UI_MODEL_CHOICES` and `/api/models`, validated exactly like existing models.
@@ -126,7 +126,7 @@ audio.lak.nz should also support verbatim speech-to-text — transcribing exactl
 3. **Verbatim default, intended optional** — per-job `mode=verbatim|intended` query/form param; defaults to `verbatim` (or `CRISPER_MODE` env). Faster-whisper models ignore the mode and keep their existing behaviour.
 4. **Same result shape** — text/segments/t0/t1 stay identical for the UI; CrisperWhisper results additionally include `mode`, `backend`, a top-level `words` list and per-segment `words` (`{word, t0, t1}` in ms).
 5. **Word-level timestamps always on** — `word_timestamps=True` (no measurable overhead per upstream docs).
-6. **Backend** — install `crisperwhisper[transformers]` (pure PyTorch): the `[ct2]` extra conflicts with faster-whisper's upstream `ctranslate2` and has no ARM64 wheels (audio.lak.nz is Oracle A1 ARM64). `CRISPER_BACKEND=auto` resolves to ct2 only when the `ctranslate2-crisperwhisper` fork is actually installed.
+6. **Backend** — install `crisperwhisper[transformers]` (pure PyTorch): the `[ct2]` extra conflicts with faster-whisper's upstream `ctranslate2` and has no ARM64 wheels (the reference host is Oracle A1-class ARM64). `CRISPER_BACKEND=auto` resolves to ct2 only when the `ctranslate2-crisperwhisper` fork is actually installed.
 7. **Single-thread serving** — CrisperWhisper models are loaded AND run on one dedicated `ThreadPoolExecutor(max_workers=1)` thread (upstream requirement for deterministic ct2 recovery; serializes inference).
 8. **Progress** — CrisperWhisper exposes no incremental progress; jobs show honest "working, progress unknown" instead of a stuck 0%.
 9. **UI** — a "Transcription style" selector (verbatim/intended) appears in the Model card only when a `crisperwhisper-*` model is chosen; record/upload flows send `mode`.

@@ -10,13 +10,29 @@ services:
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
       - CRISPER_BACKEND=${CRISPER_BACKEND:-auto}
       - CRISPER_MODE=${CRISPER_MODE:-verbatim}
+      # Captain rule: never transcribe on this host's CPU by default. Set
+      # WHISPER_ALLOW_LOCAL_CPU=true for plain CPU-only single-host setups.
+      - WHISPER_ALLOW_LOCAL_CPU=${WHISPER_ALLOW_LOCAL_CPU:-false}
+      # GPU worker nodes (see docs/deploy-worker-nodes.md). Config file
+      # config/nodes.yaml is preferred; these env vars are the legacy form.
+      - WHISPER_WORKER_URLS=${WHISPER_WORKER_URLS:-}
+      - WHISPER_WORKER_NAMES=${WHISPER_WORKER_NAMES:-}
+      - WHISPER_GPU_MODELS=${WHISPER_GPU_MODELS:-tiny,base,small}
       - MAX_FILE_SIZE=${MAX_FILE_SIZE:-536870912}
-      - MIN_FREE_DISK_BYTES=${MIN_FREE_DISK_BYTES:-2147483648}
+      - MIN_FREE_DISK_BYTES=${MIN_FREE_DISK_BYTES:-536870912}
       - JOB_RETENTION_SECONDS=${JOB_RETENTION_SECONDS:-7200}
       - HF_TOKEN=${HF_TOKEN:-}
       - HF_HOME=/cache
     volumes:
       - hf-cache:/cache
+      # Deployment node list (config/nodes.yaml); absent on plain hosts.
+      - ./config:/app/config:ro
+    # Reach the GPU workers (reverse-SSH tunnels bound on this host's docker
+    # bridge gateway, e.g. 10.99.0.1) from inside the container.
+    extra_hosts:
+      - "host.docker.internal:${WHISPER_HOST_GATEWAY:-10.99.0.1}"
+    # Memory guard: keeps a runaway job from taking down the host.
+    mem_limit: ${MEM_LIMIT:-8589934592}  # 8 GiB
     tmpfs:
       - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
     restart: unless-stopped
