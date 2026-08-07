@@ -92,7 +92,7 @@ The GPU override:
 | `CRISPER_MODE` | `verbatim` | Default CrisperWhisper transcription mode when a request doesn't specify one: `verbatim` or `intended` |
 | `HOST_PORT` | `8561` | Host port mapping |
 | `MAX_FILE_SIZE` | `536870912` (512 MB) | Max upload size in bytes |
-| `MIN_FREE_DISK_BYTES` | `2147483648` (2 GB) | Minimum free disk space before rejecting uploads |
+| `MIN_FREE_DISK_BYTES` | `536870912` (512 MB) | Minimum free space in WORK_DIR before rejecting uploads (keep below the tmpfs size) |
 | `JOB_RETENTION_SECONDS` | `604800` (1 week) | How long transcription **results** (status.json) are kept |
 | `AUDIO_RETENTION_SECONDS` | `1800` (30 min) | How long the uploaded **recording** is kept before deletion |
 | `MEM_LIMIT` | `8g` | Container memory limit |
@@ -198,7 +198,7 @@ The app includes multiple safeguards for deployment on hosts with limited disk:
 1. **tmpfs work dir** — `/tmp/whisper-stt` is a RAM-backed tmpfs volume capped at 2 GB.
    No host disk space is used for processing; all data is lost on restart.
 2. **MAX_FILE_SIZE** — Default 512 MB upload limit prevents runaway files.
-3. **MIN_FREE_DISK_BYTES** — Uploads are rejected when host free space drops below 2 GB.
+3. **MIN_FREE_DISK_BYTES** — Uploads are rejected when WORK_DIR free space drops below 512 MB (keep this below the tmpfs work-dir size).
 4. **Periodic cleanup** — Stale job directories and chunk sessions older than 30 minutes
    are removed every 10 minutes.
 5. **Startup cleanup** — Only **expired** jobs/recordings are removed; completed transcripts

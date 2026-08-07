@@ -33,7 +33,10 @@ CRISPER_MODEL_IDS = {
     "crisperwhisper-small": "nyralabs/CrisperWhisper2.0_small",
 }
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "536870912"))   # 512 MB (default; safer for tight-disk VPS)
-MIN_FREE_DISK_BYTES = int(os.getenv("MIN_FREE_DISK_BYTES", "2147483648"))  # 2 GB minimum free space
+# Minimum free bytes in WORK_DIR before uploads are rejected. Must be well
+# below the default tmpfs work-dir size (2 GB) or the check trips as soon as
+# a single job dir exists.
+MIN_FREE_DISK_BYTES = int(os.getenv("MIN_FREE_DISK_BYTES", "536870912"))  # 512 MB default
 # Transcripts (status.json / result text) are kept for 1 week (captain requirement,
 # supersedes the earlier 2h default). Minimum requirement: >= 1 hour.
 JOB_RETENTION_SECONDS = int(os.getenv("JOB_RETENTION_SECONDS", "604800"))  # 1 week default

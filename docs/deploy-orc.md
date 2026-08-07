@@ -81,8 +81,8 @@ Disk is tight. The app includes several safeguards:
    — data is lost on restart, never fills the host disk.
 2. **MAX_FILE_SIZE**: Default **512 MB** upload limit (configurable via
    `MAX_FILE_SIZE` env var).
-3. **MIN_FREE_DISK_BYTES**: Uploads rejected when host disk free drops below
-   **2 GB** (configurable via env var).
+3. **MIN_FREE_DISK_BYTES**: Uploads rejected when WORK_DIR free drops below
+   **512 MB** (keep below the tmpfs work-dir size; configurable via env var).
 4. **Periodic cleanup**: Stale jobs and chunk sessions older than 30 minutes
    are automatically removed every 10 minutes. Transcripts (status.json) are
    kept for `JOB_RETENTION_SECONDS` (default 1 week); recordings are deleted
