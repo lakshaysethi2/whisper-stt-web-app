@@ -14,10 +14,13 @@
 # The AWQ GPU ops are dropped from the build (see below): their sm_75+
 # f16x2/mma PTX cannot compile for sm_50, and whisper never uses AWQ.
 #
-# torch/crisperwhisper are deliberately EXCLUDED (CPU-only torch backend,
-# ~2.5 GB of build) — crisperwhisper-* model jobs are not dispatched to
-# workers in automatic mode. The worker's /health still reports device=cuda
-# so the node picker shows "GPU Node A (GPU)".
+# torch/crisperwhisper are now INCLUDED via the transformers backend so
+# explicit crisperwhisper-* jobs dispatched to a GPU worker (e.g. Node B)
+# actually complete instead of failing with "crisperwhisper is not
+# installed". The pure-PyTorch backend avoids the ctranslate2 fork conflict
+# (upstream ctranslate2 overwrites ctranslate2-crisperwhisper files) and
+# keeps the source-built CTranslate2 (sm_50/sm_61 kernels for 940MX/MX330)
+# for faster-whisper. Same ffmpeg 16kHz mono pre-decode and job queue.
 
 # --- Builder: compile CTranslate2 4.8.1 for the target GPU arch -----------
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
@@ -90,16 +93,20 @@ RUN ldconfig
 
 WORKDIR /app
 COPY requirements.txt .
-# Drop the crisperwhisper[transformers] line: CPU-only torch backend, not
-# wanted here. ctranslate2 is pinned to the version built from source above
-# (see note: the source build must stay installed, not the stock wheel).
-RUN sed -i '/^crisperwhisper/d;/^librosa/d;/^soundfile/d' requirements.txt \
-  && echo 'ctranslate2==4.8.1' >> requirements.txt \
+# Keep crisperwhisper[transformers] (pure-PyTorch backend): the [ct2] extra
+# would require the ctranslate2-crisperwhisper fork which overwrites the
+# source-built upstream ctranslate2 (and has no sm_50 kernels). The
+# transformers backend is slower (~4-5x vs ct2 on GPU) but complete:
+# verbatim/intended, word timestamps, longform all work. Pin the source-
+# built ctranslate2 after requirements so the stock wheel cannot replace it.
+RUN echo 'ctranslate2==4.8.1' >> requirements.txt \
   && pip install --no-cache-dir -r requirements.txt \
-  && pip install --no-cache-dir librosa soundfile \
+  && pip install --no-cache-dir librosa==0.11.0 soundfile==0.14.0 \
   && pip install --no-cache-dir --no-deps --force-reinstall /wheelhouse/ctranslate2-*.whl \
+  && python3 -c "import crisperwhisper; print('crisperwhisper', crisperwhisper.__version__, 'ok')" \
+  && python3 -c "import librosa, soundfile; print('librosa', librosa.__version__, 'soundfile', soundfile.__version__, 'ok')" \
   && test ! -d /usr/local/lib/python3.10/dist-packages/ctranslate2.libs \
-  && echo "worker image: source-built ctranslate2 (not the stock wheel) OK"
+  && echo "worker image: source-built ctranslate2 + crisperwhisper[transformers] + librosa/soundfile OK"
 
 COPY app/ app/
 COPY static/ static/
