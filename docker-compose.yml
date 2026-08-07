@@ -32,7 +32,7 @@ services:
     extra_hosts:
       - "host.docker.internal:${WHISPER_HOST_GATEWAY:-10.99.0.1}"
     # Memory guard: keeps a runaway job from taking down the host.
-    mem_limit: ${MEM_LIMIT:-8g}
+    mem_limit: ${MEM_LIMIT:-8589934592}  # 8 GiB
     tmpfs:
       - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
     restart: unless-stopped

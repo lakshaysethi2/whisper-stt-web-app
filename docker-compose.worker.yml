@@ -42,7 +42,7 @@ services:
       - ./config:/app/config:ro
     tmpfs:
       - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
-    mem_limit: ${MEM_LIMIT:-6g}
+    mem_limit: ${MEM_LIMIT:-6442450944}  # 6 GiB
     restart: unless-stopped
     deploy:
       resources:
