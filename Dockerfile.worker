@@ -93,9 +93,10 @@ COPY requirements.txt .
 # Drop the crisperwhisper[transformers] line: CPU-only torch backend, not
 # wanted here. ctranslate2 is pinned to the version built from source above
 # (see note: the source build must stay installed, not the stock wheel).
-RUN sed -i '/^crisperwhisper/d' requirements.txt \
+RUN sed -i '/^crisperwhisper/d;/^librosa/d;/^soundfile/d' requirements.txt \
   && echo 'ctranslate2==4.8.1' >> requirements.txt \
   && pip install --no-cache-dir -r requirements.txt \
+  && pip install --no-cache-dir librosa soundfile \
   && pip install --no-cache-dir --no-deps --force-reinstall /wheelhouse/ctranslate2-*.whl \
   && test ! -d /usr/local/lib/python3.10/dist-packages/ctranslate2.libs \
   && echo "worker image: source-built ctranslate2 (not the stock wheel) OK"
