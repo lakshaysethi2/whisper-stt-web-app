@@ -18,5 +18,8 @@ crisperwhisper[transformers]==2.0.1
 # added in 4.57. soundfile is already pulled by crisperwhisper.
 # Parakeet runtime is optional: app boots with a clear "parakeet not available" when missing.
 transformers>=4.57
+# Parakeet feature extractor needs librosa (not pulled by crisperwhisper[transformers]).
+librosa>=0.11
+soundfile>=0.13
 # Node config loader (app/nodes.py reads config/nodes.yaml).
 pyyaml>=6.0
