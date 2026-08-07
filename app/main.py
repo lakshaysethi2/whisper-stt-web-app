@@ -827,17 +827,22 @@ async def upload_finish(
                         "model": chosen_model,
                         "mode": chosen_mode,
                         "created_at": created_at,
+                        # Keep the live node/stage fields set during dispatch
+                        # so the result page shows which node ran the job.
+                        **{k: _jobs[job_id][k] for k in ("node", "stage", "worker") if k in _jobs[job_id]},
                     }
                 _persist_job(job_id, _jobs[job_id])
             except Exception as e:
                 logger.error("Transcription failed job=%s error=%s", job_id, str(e))
                 async with _jobs_lock:
+                    prev = _jobs[job_id]
                     _jobs[job_id] = {
                         "status": "failed",
                         "error": str(e),
                         "model": chosen_model,
                         "mode": chosen_mode,
-                        "created_at": _jobs[job_id]["created_at"],
+                        "created_at": prev["created_at"],
+                        **{k: prev[k] for k in ("node", "stage", "worker") if k in prev},
                     }
                 _persist_job(job_id, _jobs[job_id])
             finally:
@@ -1036,24 +1041,28 @@ async def transcribe(
                 result.get("duration", 0), result.get("process_time", 0),
             )
             async with _jobs_lock:
+                prev = _jobs[job_id]
                 _jobs[job_id] = {
                     "status": "completed",
                     "progress": 1.0,
                     "result": result,
                     "model": chosen_model,
                     "mode": chosen_mode,
-                    "created_at": _jobs[job_id]["created_at"],
+                    "created_at": prev["created_at"],
+                    **{k: prev[k] for k in ("node", "stage", "worker") if k in prev},
                 }
             _persist_job(job_id, _jobs[job_id])
         except Exception as e:
             logger.error("Transcription failed job=%s error=%s", job_id, str(e))
             async with _jobs_lock:
+                prev = _jobs[job_id]
                 _jobs[job_id] = {
                     "status": "failed",
                     "error": str(e),
                     "model": chosen_model,
                     "mode": chosen_mode,
-                    "created_at": _jobs[job_id]["created_at"],
+                    "created_at": prev["created_at"],
+                    **{k: prev[k] for k in ("node", "stage", "worker") if k in prev},
                 }
             _persist_job(job_id, _jobs[job_id])
         finally:
