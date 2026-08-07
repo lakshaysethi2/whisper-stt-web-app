@@ -7,17 +7,19 @@
 # target arch in CUDA_ARCH_LIST (build arg: 5.0 or 6.1) and then runs the
 # same whisper-stt app as a localhost-only worker.
 #
-# Version is pinned to v4.7.2 on purpose: 4.8.0+ swapped Thrust 1.12 for
-# CCCL 2.7.0 and regressed CUDA inference ("parallel_for failed:
-# cudaErrorInvalidDevice") on several GPUs (OpenNMT/CTranslate2#2064);
-# 4.7.2 is the known-good version for these old GPUs.
+# Version pinned to v4.8.1: it is the last release whose AWQ CUDA sources
+# compile for sm_50 (4.7.x uses sm_53-only f16 PTX in src/ops/awq/*.cu) and
+# it built successfully for this GPU before. 4.8.0+ swapped Thrust 1.12 for
+# CCCL 2.7.0, which regressed WhisperModel.align() on some GPUs
+# (OpenNMT/CTranslate2#2064) — this app never calls align() (faster-whisper
+# runs with word_timestamps=False), so that regression does not apply here.
 #
 # torch/crisperwhisper are deliberately EXCLUDED (CPU-only torch backend,
 # ~2.5 GB of build) — crisperwhisper-* model jobs are not dispatched to
 # workers in automatic mode. The worker's /health still reports device=cuda
 # so the node picker shows "GPU Node A (GPU)".
 
-# --- Builder: compile CTranslate2 4.7.2 for the target GPU arch -----------
+# --- Builder: compile CTranslate2 4.8.1 for the target GPU arch -----------
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -35,7 +37,7 @@ RUN pip install --no-cache-dir pybind11==2.11.1 setuptools wheel
 WORKDIR /src
 # --recurse-submodules is required: cmake fails without third_party submodules
 # (spdlog, cpu_features, thrust).
-RUN git clone --depth 1 --recurse-submodules --branch v4.7.2 \
+RUN git clone --depth 1 --recurse-submodules --branch v4.8.1 \
     https://github.com/OpenNMT/CTranslate2.git ct2
 
 RUN cmake -S ct2 -B ct2/build \
@@ -80,7 +82,7 @@ COPY requirements.txt .
 # wanted here. ctranslate2 is pinned to the version built from source above
 # (see note: the source build must stay installed, not the stock wheel).
 RUN sed -i '/^crisperwhisper/d' requirements.txt \
-  && echo 'ctranslate2==4.7.2' >> requirements.txt \
+  && echo 'ctranslate2==4.8.1' >> requirements.txt \
   && pip install --no-cache-dir -r requirements.txt \
   && test ! -d /usr/local/lib/python3.10/dist-packages/ctranslate2.libs \
   && echo "worker image: source-built ctranslate2 (not the stock wheel) OK"
