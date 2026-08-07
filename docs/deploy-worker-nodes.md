@@ -72,10 +72,10 @@ takes a while — reuse the built image across restarts.
 ## Reverse tunnel to the main host
 
 The workers bind localhost on the GPU hosts, so the main host cannot reach
-them directly. Each GPU host runs a systemd `reverse-tunnel.service`
-(estate pattern) forwarding its worker port to the main host's **docker
-bridge gateway** (10.99.0.1 here — the interface the app container reaches
-via `host.docker.internal`).
+them directly. Each GPU host runs a systemd reverse-tunnel service (estate
+pattern) forwarding its worker port to the main host's **docker bridge
+gateway** (10.99.0.1 here — the interface the app container reaches via
+`host.docker.internal`).
 
 On the main host, `sshd_config` needs `GatewayPorts clientspecified`
 (drop-in in `/etc/ssh/sshd_config.d/`) so the tunnel can bind the
@@ -90,30 +90,31 @@ sudo ufw allow in on $BR to any port 8564 proto tcp
 sudo ufw allow in on $BR to any port 8565 proto tcp
 ```
 
-GPU-host unit (`/etc/systemd/system/reverse-tunnel-worker.service`, user
-`tunnel` with a key authorized on the main host):
+When the GPU host already has a reverse tunnel service (common on laptops
+that also tunnel SSH), add the worker forward to its ExecStart. Example —
+appending `-R 10.99.0.1:8564:localhost:8564` to an existing unit running as
+user `tunnel` with a key authorized on the main host:
 
 ```ini
-[Unit]
-Description=Reverse SSH tunnel (whisper worker) to main host
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
 [Service]
 User=tunnel
-ExecStart=/usr/bin/ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -i /home/tunnel/.ssh/tunnel_key -R 10.99.0.1:8564:localhost:8564 <main-host-user>@<main-host>
+ExecStart=/usr/bin/ssh -NT -R 10.99.0.1:8564:localhost:8564 \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new \
+  -i /home/tunnel/.ssh/tunnel_key -R 2222:localhost:22 \
+  <main-host-user>@<main-host>
 Restart=always
 RestartSec=10
-[Install]
-WantedBy=multi-user.target
 ```
 
-Worker B tunnels `-R 10.99.0.1:8565:localhost:8564` (its local port is
-8565). Then:
+(`systemctl daemon-reload && systemctl restart reverse-tunnel.service` —
+note that restarting the tunnel drops your own SSH path if you connect
+through it, so reconnect after.) For a fresh host, create a dedicated
+`reverse-tunnel-worker.service` with the same shape and just the worker
+forward. Worker B forwards `-R 10.99.0.1:8565:localhost:8564` (its local
+port is 8565). Then verify from the main host:
 
 ```bash
-sudo systemctl enable --now reverse-tunnel-worker.service
-# from the main host:
 curl -sf http://10.99.0.1:8564/health   # and 8565 — must answer
 ```
 
