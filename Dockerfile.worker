@@ -1,18 +1,23 @@
 # GPU transcription worker image — faster-whisper ONLY, with CTranslate2
-# compiled from source for the laptop GPUs.
+# compiled from source for the small-VRAM GPU workers.
 #
 # Why from source: the stock ctranslate2 pip wheel ships ONLY sm_86/sm_90/
-# sm_100 CUDA kernels, so it cannot run on the laptops' Maxwell/Pascal GPUs
-# (940MX = CC 5.0, MX330 = CC 6.1). This image builds CTranslate2 v4.8.1 with
-# the target arch in CUDA_ARCH_LIST (build arg: 5.0 on laptop1, 6.1 on
-# laptop2) and then runs the same whisper-stt app as a localhost-only worker.
+# sm_100 CUDA kernels, so it cannot run on the workers' Maxwell/Pascal GPUs
+# (940MX = CC 5.0, MX330 = CC 6.1). This image builds CTranslate2 with the
+# target arch in CUDA_ARCH_LIST (build arg: 5.0 or 6.1) and then runs the
+# same whisper-stt app as a localhost-only worker.
+#
+# Version is pinned to v4.7.2 on purpose: 4.8.0+ swapped Thrust 1.12 for
+# CCCL 2.7.0 and regressed CUDA inference ("parallel_for failed:
+# cudaErrorInvalidDevice") on several GPUs (OpenNMT/CTranslate2#2064);
+# 4.7.2 is the known-good version for these old GPUs.
 #
 # torch/crisperwhisper are deliberately EXCLUDED (CPU-only torch backend,
 # ~2.5 GB of build) — crisperwhisper-* model jobs are not dispatched to
 # workers in automatic mode. The worker's /health still reports device=cuda
 # so the node picker shows "GPU Node A (GPU)".
 
-# --- Builder: compile CTranslate2 4.8.1 for the target GPU arch -----------
+# --- Builder: compile CTranslate2 4.7.2 for the target GPU arch -----------
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -28,7 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir pybind11==2.11.1 setuptools wheel
 
 WORKDIR /src
-RUN git clone --depth 1 --branch v4.8.1 https://github.com/OpenNMT/CTranslate2.git ct2
+# --recurse-submodules is required: cmake fails without third_party submodules
+# (spdlog, cpu_features, thrust).
+RUN git clone --depth 1 --recurse-submodules --branch v4.7.2 \
+    https://github.com/OpenNMT/CTranslate2.git ct2
 
 RUN cmake -S ct2 -B ct2/build \
       -DCMAKE_BUILD_TYPE=Release \
@@ -41,7 +49,11 @@ RUN cmake -S ct2 -B ct2/build \
   && cmake --build ct2/build -j"$(nproc)" \
   && cmake --install ct2/build
 
-# Python bindings (links the CUDA build installed to /usr/local/lib64).
+# Ensure the installed lib is also reachable at /usr/local/lib64 (the path
+# the python bindings rpath uses; ubuntu cmake installs to /usr/local/lib).
+RUN mkdir -p /usr/local/lib64 && cp -a /usr/local/lib/libctranslate2.so* /usr/local/lib64/ 2>/dev/null || true
+
+# Python bindings (thin pybind11 ext linking the CUDA build installed above).
 RUN pip install --no-cache-dir ./ct2/python
 
 # --- Runtime: the whisper worker app on the built CTranslate2 --------------
@@ -53,19 +65,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 
-# CTranslate2 CUDA build + python package (same python 3.10 on ubuntu 22.04).
+# CTranslate2 CUDA build + python package. Copy the lib AND the pip package
+# WITH its dist-info so the runtime's `pip install -r requirements.txt` sees
+# ctranslate2 already satisfied and does NOT replace it with the stock PyPI
+# wheel (which ships only sm_86/90/100 kernels and cannot run on these GPUs).
 COPY --from=builder /usr/local/lib64/libctranslate2.so* /usr/local/lib64/
-COPY --from=builder /usr/local/lib/python3.10/dist-packages/ctranslate2 \
-                    /usr/local/lib/python3.10/dist-packages/ctranslate2
+COPY --from=builder /usr/local/lib/python3.10/dist-packages/ctranslate2* \
+                    /usr/local/lib/python3.10/dist-packages/
 RUN ldconfig
 
 WORKDIR /app
 COPY requirements.txt .
 # Drop the crisperwhisper[transformers] line: CPU-only torch backend, not
-# wanted here. faster-whisper's ctranslate2>=4.0 requirement is satisfied by
-# the source build above, so pip leaves it alone.
+# wanted here. ctranslate2 is pinned to the version built from source above
+# (see note: the source build must stay installed, not the stock wheel).
 RUN sed -i '/^crisperwhisper/d' requirements.txt \
-  && pip install --no-cache-dir -r requirements.txt
+  && echo 'ctranslate2==4.7.2' >> requirements.txt \
+  && pip install --no-cache-dir -r requirements.txt \
+  && test ! -d /usr/local/lib/python3.10/dist-packages/ctranslate2.libs \
+  && echo "worker image: source-built ctranslate2 (not the stock wheel) OK"
 
 COPY app/ app/
 COPY static/ static/
