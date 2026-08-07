@@ -219,6 +219,13 @@ def _load_crisper_model_sync(model_name: str) -> None:
     hf_id = CRISPER_MODEL_IDS[model_name]
     backend = _resolve_crisper_backend_choice()
     device = _device_info.get("device", "cpu")
+    # Torch CUDA 13 wheels have no sm_50/sm_61 kernels (need >=sm_75); fall back
+    # to CPU for the pure-PyTorch transformers backend on these Maxwell/Pascal
+    # workers (CTranslate2 faster-whisper still uses the source-built sm_50 lib).
+    cc = _device_info.get("compute_capability", 0)
+    if device == "cuda" and cc and cc < 75 and backend != "ct2":
+        logger.warning("CrisperWhisper CC %d < 75: torch has no kernel, using CPU", cc)
+        device = "cpu"
     if device == "cuda":
         device_arg, compute_type = "cuda", "float16"
     else:
@@ -230,12 +237,21 @@ def _load_crisper_model_sync(model_name: str) -> None:
         "Loading CrisperWhisper %s (backend=%s, device=%s, compute_type=%s)...",
         hf_id, backend, device_arg, compute_type,
     )
-    model = CrisperWhisperModel(
-        hf_id,
-        backend=backend,
-        device=device_arg,
-        compute_type=compute_type,
-    )
+    try:
+        model = CrisperWhisperModel(
+            hf_id,
+            backend=backend,
+            device=device_arg,
+            compute_type=compute_type,
+        )
+    except Exception as e:
+        msg = str(e).lower()
+        if device_arg == "cuda" and ("no kernel image" in msg or "not compatible" in msg or "invalid device" in msg):
+            logger.warning("CrisperWhisper CUDA load failed (%s), retrying on CPU", e)
+            device_arg, compute_type = "cpu", "float32"
+            model = CrisperWhisperModel(hf_id, backend=backend, device=device_arg, compute_type=compute_type)
+        else:
+            raise
     _crisper_models[model_name] = model
     _resolved_crisper_backend = getattr(model, "backend", backend)
     logger.info("CrisperWhisper %s loaded (backend=%s).", hf_id, _resolved_crisper_backend)
@@ -361,12 +377,19 @@ def _transcribe_crisper_sync(
     decode_path, temp_wav = _prepare_crisper_audio(audio_path)
     try:
         start = time.monotonic()
-        cw = model.transcribe(
-            decode_path,
-            language=language or "en",
-            mode=mode,
-            word_timestamps=True,
-        )
+        try:
+            cw = model.transcribe(
+                decode_path,
+                language=language or "en",
+                mode=mode,
+                word_timestamps=True,
+            )
+        except Exception as e:
+            msg = str(e).lower()
+            if "no kernel image" in msg or "not compatible" in msg:
+                logger.warning("CrisperWhisper CUDA kernel missing, retrying as CPU job: %s", e)
+                raise RuntimeError(f"CUDA kernel missing for this GPU ({e}); retry on CPU") from e
+            raise
         elapsed = time.monotonic() - start
 
         logger.info(
@@ -425,27 +448,36 @@ def _load_parakeet_model_sync(model_name: str) -> None:
         )
     hf_id = PARAKEET_MODEL_IDS[model_name]
     device = _device_info.get("device", "cpu")
-    # Parakeet via torch: fp16 on any CUDA device (Pascal's fp16 works in torch,
-    # unlike CTranslate2's CC>=7 rule for faster-whisper), fp32 on CPU.
-    # Use device_map="auto" behaviour manually.
+    # Parakeet via torch: fp16 on CUDA, fp32 on CPU. On 2 GB workers (MX330)
+    # fp16 can still OOM on attn peaks; retry once on CPU so the job
+    # completes instead of failing (ponytail: single retry, not per-chunk).
     torch_device = "cuda" if device == "cuda" else "cpu"
     dtype = torch.float16 if torch_device == "cuda" else torch.float32
     # Keep single-GPU path simple; device_map is not needed for 600M on 2GB.
     logger.info("Loading Parakeet %s on %s (%s)...", hf_id, torch_device, dtype)
     try:
         processor = AutoProcessor.from_pretrained(hf_id, trust_remote_code=False)
-        model = AutoModelForTDT.from_pretrained(
-            hf_id, dtype=dtype, trust_remote_code=False
-        )
+        model = AutoModelForTDT.from_pretrained(hf_id, dtype=dtype, trust_remote_code=False)
         model.to(torch_device)
         model.eval()
     except RuntimeError as e:
-        if "out of memory" in str(e).lower():
-            raise RuntimeError(
-                f"Parakeet {model_name} OOM on {torch_device}; try the lighter 'base' model. "
-                f"({e})"
-            ) from e
-        raise
+        low = str(e).lower()
+        if ("out of memory" in low or "no kernel image" in low or "not compatible" in low) and torch_device == "cuda":
+            logger.warning("Parakeet %s load failed on CUDA (%s), retrying on CPU", model_name, e)
+            try:
+                import torch as _torch2
+                if _torch2.cuda.is_available(): _torch2.cuda.empty_cache()
+            except Exception: pass
+            torch_device, dtype = "cpu", torch.float32
+            processor = AutoProcessor.from_pretrained(hf_id, trust_remote_code=False)
+            model = AutoModelForTDT.from_pretrained(hf_id, dtype=dtype, trust_remote_code=False)
+            model.to(torch_device)
+            model.eval()
+            logger.info("Parakeet %s loaded on CPU (fallback).", hf_id)
+        elif "out of memory" in low:
+            raise RuntimeError(f"Parakeet {model_name} OOM on {torch_device}; try the lighter 'base' model. ({e})") from e
+        else:
+            raise
     _parakeet_models[model_name] = (model, processor)
     logger.info("Parakeet %s loaded on %s.", hf_id, torch_device)
 
@@ -488,9 +520,24 @@ def _transcribe_parakeet_sync(
         inputs = processor(data, sampling_rate=16000, return_tensors="pt")
         # move tensors to device/dtype
         inputs = {k: (v.to(torch_device) if hasattr(v, "to") else v) for k, v in inputs.items()}
-        # Some processors return attention_mask; ensure it's on device
-        with torch.inference_mode():
-            output = model.generate(**inputs, return_dict_in_generate=True)
+        try:
+            with torch.inference_mode():
+                output = model.generate(**inputs, return_dict_in_generate=True)
+        except RuntimeError as _e:
+            if "out of memory" in str(_e).lower() and torch_device == "cuda":
+                logger.warning("Parakeet generate OOM on CUDA, retrying on CPU")
+                try:
+                    import torch as _t2
+                    if _t2.cuda.is_available(): _t2.cuda.empty_cache()
+                except Exception: pass
+                try: model.to("cpu")
+                except Exception: pass
+                torch_device, compute_type = "cpu", "float32"
+                inputs = {k: (v.cpu() if hasattr(v, "cpu") else v) for k, v in inputs.items()}
+                with torch.inference_mode():
+                    output = model.generate(**inputs, return_dict_in_generate=True)
+            else:
+                raise
             # decode with word timestamps if durations are available
             durations = getattr(output, "durations", None)
             sequences = getattr(output, "sequences", output)
