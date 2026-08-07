@@ -10,6 +10,15 @@ logger = logging.getLogger(__name__)
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 
+# Captain rule: GPU-node deployments must never transcribe on the main host's
+# CPU (an ARM VPS CPU job once OOM-crashed the host). When this is false the
+# dispatch layer refuses local transcription: jobs fail cleanly with "No
+# transcription node available" when no GPU node can take them, instead of
+# silently falling back to CPU. Set true for plain CPU-only single-host
+# deployments (the docker-compose.yml default keeps the public quick start
+# working).
+WHISPER_ALLOW_LOCAL_CPU = os.getenv("WHISPER_ALLOW_LOCAL_CPU", "false").strip().lower() in ("1", "true", "yes", "on")
+
 # --- CrisperWhisper 2.0 (verbatim ASR) ---
 # Backend selection for CrisperWhisper models: "auto" (prefer ct2 when the
 # crisperwhisper[ct2] extra is installed, else transformers), "ct2", or
@@ -17,7 +26,7 @@ WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 # NOTE: on this stack the [ct2] extra cannot be used alongside faster-whisper
 # (faster-whisper depends on upstream ctranslate2, which overwrites the
 # ctranslate2-crisperwhisper fork's files) and its wheels are Linux x86_64
-# only (audio.lak.nz is ARM64), so "auto" resolves to transformers here.
+# only (not installable on the reference ARM64 host), so "auto" resolves to transformers here.
 CRISPER_BACKEND = os.getenv("CRISPER_BACKEND", "auto").strip().lower()
 # Default transcription mode for CrisperWhisper models when a request does not
 # specify one. "verbatim" preserves fillers/stutters; "intended" is clean text.
@@ -32,8 +41,18 @@ CRISPER_MODEL_IDS = {
     "crisperwhisper-medium": "nyralabs/CrisperWhisper2.0_medium",
     "crisperwhisper-small": "nyralabs/CrisperWhisper2.0_small",
 }
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "536870912"))   # 512 MB (default; safer for tight-disk VPS)
-MIN_FREE_DISK_BYTES = int(os.getenv("MIN_FREE_DISK_BYTES", "2147483648"))  # 2 GB minimum free space
+
+# Parakeet TDT 0.6B v3 — FastConformer-TDT, 25 EU langs, auto-detect,
+# punct/cap, word+segment timestamps, long-audio (24 min / 3h local-attn).
+# See https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+PARAKEET_MODEL_IDS = {
+    "parakeet-tdt-0.6b-v3": "nvidia/parakeet-tdt-0.6b-v3",
+}
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "536870912"))   # 512 MB (default; safer for tight-disk hosts)
+# Minimum free bytes in WORK_DIR before uploads are rejected. Must be well
+# below the default tmpfs work-dir size (2 GB) or the check trips as soon as
+# a single job dir exists.
+MIN_FREE_DISK_BYTES = int(os.getenv("MIN_FREE_DISK_BYTES", "536870912"))  # 512 MB default
 # Transcripts (status.json / result text) are kept for 1 week (captain requirement,
 # supersedes the earlier 2h default). Minimum requirement: >= 1 hour.
 JOB_RETENTION_SECONDS = int(os.getenv("JOB_RETENTION_SECONDS", "604800"))  # 1 week default
@@ -65,6 +84,8 @@ UI_MODEL_CHOICES = [
     "crisperwhisper-turbo",
     "crisperwhisper-medium",
     "crisperwhisper-small",
+    # Parakeet TDT 0.6B v3 (FastConformer-TDT, 25 EU langs, auto-detect)
+    "parakeet-tdt-0.6b-v3",
 ]
 
 SUPPORTED_MODELS = [
@@ -81,12 +102,19 @@ SUPPORTED_MODELS = [
     {"name": "crisperwhisper-turbo", "params": "809M", "vram_fp32": "3400", "vram_fp16": "1700", "disk_gb": "1.6", "family": "crisperwhisper"},
     {"name": "crisperwhisper-medium", "params": "769M", "vram_fp32": "3200", "vram_fp16": "1600", "disk_gb": "1.5", "family": "crisperwhisper"},
     {"name": "crisperwhisper-small", "params": "244M", "vram_fp32": "1200", "vram_fp16": "600", "disk_gb": "0.5", "family": "crisperwhisper"},
+    # Parakeet TDT 0.6B v3: 0.6B FastConformer-TDT, ~2.5 GB download, ~1.2 GB VRAM fp16
+    {"name": "parakeet-tdt-0.6b-v3", "params": "600M", "vram_fp32": "2400", "vram_fp16": "1200", "disk_gb": "2.5", "family": "parakeet"},
 ]
 
 
 def is_crisper_model(model_name: str) -> bool:
     """True if the (already validated) model choice is a CrisperWhisper model."""
     return model_name in CRISPER_MODEL_IDS
+
+
+def is_parakeet_model(model_name: str) -> bool:
+    """True if the (already validated) model choice is a Parakeet model."""
+    return model_name in PARAKEET_MODEL_IDS
 
 
 def validate_model(model_name: str | None) -> str:

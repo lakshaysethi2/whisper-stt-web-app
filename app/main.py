@@ -15,7 +15,8 @@ import shutil
 import time
 
 from app.config import (
-    WHISPER_MODEL, WHISPER_LANGUAGE, MAX_FILE_SIZE,
+    WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_ALLOW_LOCAL_CPU,
+    MAX_FILE_SIZE,
     MIN_FREE_DISK_BYTES, check_disk_space,
     ALLOWED_EXTENSIONS, SUPPORTED_MODELS, UI_MODEL_CHOICES,
     validate_model, validate_mode,
@@ -27,6 +28,10 @@ from app.config import (
 from app.transcriber import (
     load_model, transcribe_audio, get_progress, get_loaded_models,
     get_crisper_backend_info, _device_info,
+)
+from app.nodes import CPU_NODE
+from app.remote import (
+    should_dispatch, transcribe_remote, validate_worker, worker_statuses,
 )
 
 logging.basicConfig(
@@ -342,6 +347,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Whisper STT", version="3.0.0", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """The page and its assets are tiny and change on every deploy — don't let
+    edge caches (Cloudflare) serve a stale picker/JS to users."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/") or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -404,6 +420,34 @@ async def upload_config():
     }
 
 
+@app.get("/api/nodes")
+async def nodes():
+    """Node picker data: every configured GPU worker with live online status,
+    plus whether local CPU transcription is allowed.
+
+    Additive endpoint for the frontend; returns an empty list when no nodes
+    are configured (the site then always transcribes locally).
+    """
+    statuses = await worker_statuses()
+    return {
+        "nodes": statuses,
+        "automatic": bool(statuses),
+        "cpu": {"label": CPU_NODE, "enabled": WHISPER_ALLOW_LOCAL_CPU},
+        "allow_local_cpu": WHISPER_ALLOW_LOCAL_CPU,
+    }
+
+
+@app.get("/api/workers")
+async def workers():
+    """Back-compat alias of /api/nodes (same worker list)."""
+    statuses = await worker_statuses()
+    return {
+        "workers": statuses,
+        "automatic": bool(statuses),
+        "server_node": CPU_NODE,
+    }
+
+
 def _cleanup_stale_chunks(max_age_seconds: int = 1800):
     now = time.time()
     if not CHUNK_DIR.exists():
@@ -425,6 +469,78 @@ def _cleanup_stale_chunks(max_age_seconds: int = 1800):
                 shutil.rmtree(cp, ignore_errors=True)
         except Exception:
             pass
+
+
+async def _set_job_live(job_id: str, **fields) -> None:
+    """Live-update fields on the in-memory job dict (node/stage/progress UI)."""
+    async with _jobs_lock:
+        j = _jobs.get(job_id)
+        if j:
+            j.update(fields)
+
+
+NO_NODE_ERROR = "No transcription node available — try again later."
+
+
+def _no_node_error(model: str, worker: str) -> str:
+    """Clean failure message when a job cannot run on any node."""
+    if worker == CPU_NODE:
+        return f"{CPU_NODE} transcription is disabled on this deployment."
+    if not should_dispatch(model, worker):
+        hint = "tiny, base" if model.startswith("parakeet") else "tiny, base, small"
+        if model.startswith("parakeet"):
+            hint_detail = "Parakeet 0.6B does not fit the small-VRAM workers (and the worker image excludes its torch stack); use a dispatched node that has it installed, or try a lighter model"
+        elif model.startswith("crisper"):
+            hint_detail = "CrisperWhisper needs the torch stack the worker image excludes; use a node that has it, or try a lighter Whisper model"
+        else:
+            hint_detail = f"Try a model that fits the GPU nodes ({hint})"
+        return (
+            f"Model '{model}' cannot run on any available GPU node and "
+            f"{CPU_NODE} transcription is disabled. {hint_detail}."
+        )
+    return NO_NODE_ERROR
+
+
+async def _transcribe_with_remote_fallback(
+    file_path: str, lang: str, job_id: str, model: str, mode: str, worker: str = "auto",
+) -> dict:
+    """Transcribe a job, preferring a GPU worker when configured and reachable.
+
+    Automatic mode falls back to local CPU transcription ONLY when
+    WHISPER_ALLOW_LOCAL_CPU is true; otherwise the job fails cleanly with
+    "No transcription node available" when dispatch is not possible or every
+    worker fails — the main host's CPU is never used without explicit opt-in.
+    An explicitly chosen node is used exclusively: if it fails, the job
+    FAILS with a message naming the node and the retry path — never a silent
+    switch to a node the user did not choose.
+
+    The job dict's live `node`/`stage` fields are updated so the status
+    endpoint and frontend can show "Processing on GPU Node B (GPU)" etc.
+    """
+    async def _update(stage: str, node: str) -> None:
+        await _set_job_live(job_id, stage=stage, node=node)
+
+    if should_dispatch(model, worker):
+        try:
+            return await transcribe_remote(
+                str(file_path), lang, model, mode, job_id,
+                worker=worker, on_update=_update,
+            )
+        except Exception as e:
+            if worker and worker != "auto":
+                raise RuntimeError(
+                    f"Node {worker} failed: {e}. Retry or choose another node."
+                ) from e
+            logger.warning(
+                "GPU worker dispatch failed for job %s (%s); allow_local_cpu=%s",
+                job_id, e, WHISPER_ALLOW_LOCAL_CPU,
+            )
+            if not WHISPER_ALLOW_LOCAL_CPU:
+                raise RuntimeError(NO_NODE_ERROR) from e
+    elif not WHISPER_ALLOW_LOCAL_CPU:
+        raise RuntimeError(_no_node_error(model, worker))
+    await _set_job_live(job_id, stage="transcribing", node=CPU_NODE)
+    return await transcribe_audio(str(file_path), lang, job_id, model_name=model, mode=mode)
 
 
 @app.post("/api/upload/start")
@@ -590,6 +706,7 @@ async def upload_finish(
     language: str = Query(default=""),
     model: str = Query(default=""),
     mode: str = Query(default=""),
+    worker: str = Query(default=""),
 ):
     if upload_id in _finish_locks:
         raise HTTPException(409, "Upload is already being finalized")
@@ -640,6 +757,8 @@ async def upload_finish(
         # Validate transcription mode (verbatim|intended; default verbatim for
         # CrisperWhisper models, ignored by faster-whisper models)
         chosen_mode = validate_mode(mode)
+        # Validate node choice (auto | worker name | 1-based index)
+        chosen_worker = validate_worker(worker)
 
         ext = Path(meta["filename"]).suffix.lower()
         job_id = uuid.uuid4().hex
@@ -685,17 +804,20 @@ async def upload_finish(
                 "status": "processing",
                 "progress": 0.0,
                 "created_at": time.time(),
+                "worker": chosen_worker,
+                "stage": "uploaded",
+                "node": "waiting",
             }
         _persist_job(job_id, _jobs[job_id])
 
         logger.info(
-            "Spawned transcription job=%s file=%s (%d bytes) lang=%s",
-            job_id, meta["filename"], meta["size"], lang,
+            "Spawned transcription job=%s file=%s (%d bytes) lang=%s worker=%s",
+            job_id, meta["filename"], meta["size"], lang, chosen_worker,
         )
 
         async def _run_transcription():
             try:
-                result = await transcribe_audio(str(file_path), lang, job_id, model_name=chosen_model, mode=chosen_mode)
+                result = await _transcribe_with_remote_fallback(str(file_path), lang, job_id, chosen_model, chosen_mode, chosen_worker)
                 logger.info(
                     "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
                     job_id, len(result.get("segments", [])),
@@ -711,17 +833,23 @@ async def upload_finish(
                         "model": chosen_model,
                         "mode": chosen_mode,
                         "created_at": created_at,
+                        "stage": "done",
+                        # Keep the live node field set during dispatch so the
+                        # result page shows which node ran the job.
+                        **{k: _jobs[job_id][k] for k in ("node", "worker") if k in _jobs[job_id]},
                     }
                 _persist_job(job_id, _jobs[job_id])
             except Exception as e:
                 logger.error("Transcription failed job=%s error=%s", job_id, str(e))
                 async with _jobs_lock:
+                    prev = _jobs[job_id]
                     _jobs[job_id] = {
                         "status": "failed",
                         "error": str(e),
                         "model": chosen_model,
                         "mode": chosen_mode,
-                        "created_at": _jobs[job_id]["created_at"],
+                        "created_at": prev["created_at"],
+                        **{k: prev[k] for k in ("node", "stage", "worker") if k in prev},
                     }
                 _persist_job(job_id, _jobs[job_id])
             finally:
@@ -781,6 +909,11 @@ async def transcribe_status(job_id: str):
         "job_id": job_id,
         "status": job["status"],
         "elapsed_seconds": round(elapsed, 1),
+        # Which node is (or was) handling this job, e.g. "GPU Node B (GPU)"
+        # or "CPU" — and the job stage (uploaded/dispatched/transcribing/
+        # done/failed) for the frontend's live status line.
+        "node": job.get("node"),
+        "stage": job.get("stage"),
         # Honest expiry: transcripts are kept for JOB_RETENTION_SECONDS.
         "retention_seconds": JOB_RETENTION_SECONDS,
         "expires_at": round(expires_at, 1),
@@ -812,6 +945,14 @@ async def transcribe_status(job_id: str):
                 "(server restart or crash), and the recording is no longer on the "
                 "server. Please re-upload to transcribe."
             )
+    # Fill display defaults for jobs created before node/stage existed or
+    # restored from disk without them.
+    if response.get("node") is None:
+        response["node"] = "CPU" if job["status"] in ("completed", "failed") else "waiting"
+    if response.get("stage") is None:
+        response["stage"] = (
+            "done" if job["status"] == "completed" else job["status"]
+        )
     return JSONResponse(response)
 
 
@@ -821,6 +962,7 @@ async def transcribe(
     language: str = Form(default=""),
     model: str = Form(default=""),
     mode: str = Form(default=""),
+    worker: str = Form(default=""),
 ):
     """
     Upload a file for transcription (synchronous/small files).
@@ -874,6 +1016,8 @@ async def transcribe(
     # Validate transcription mode (verbatim|intended; default verbatim for
     # CrisperWhisper models, ignored by faster-whisper models)
     chosen_mode = validate_mode(mode)
+    # Validate node choice (auto | worker name | 1-based index)
+    chosen_worker = validate_worker(worker)
 
     # Register the job BEFORE spawning the background task. Persist at creation
     # so a restart can restore this job (as "interrupted") instead of expiring it.
@@ -883,42 +1027,52 @@ async def transcribe(
             "progress": 0.0,
             "model": chosen_model,
             "mode": chosen_mode,
+            "worker": chosen_worker,
+            "stage": "uploaded",
+            "node": "waiting",
             "created_at": time.time(),
         }
     _persist_job(job_id, _jobs[job_id])
 
     logger.info(
-        "Transcribing %s (%d bytes) lang=%s job=%s",
-        file.filename, total_bytes, lang, job_id,
+        "Transcribing %s (%d bytes) lang=%s job=%s worker=%s",
+        file.filename, total_bytes, lang, job_id, chosen_worker,
     )
 
     async def _run_transcribe():
         try:
-            result = await transcribe_audio(str(file_path), lang, job_id, model_name=chosen_model, mode=chosen_mode)
+            result = await _transcribe_with_remote_fallback(str(file_path), lang, job_id, chosen_model, chosen_mode, chosen_worker)
             logger.info(
                 "Transcription complete job=%s segments=%d duration=%.1fs process=%.2fs",
                 job_id, len(result.get("segments", [])),
                 result.get("duration", 0), result.get("process_time", 0),
             )
             async with _jobs_lock:
+                prev = _jobs[job_id]
                 _jobs[job_id] = {
                     "status": "completed",
                     "progress": 1.0,
                     "result": result,
                     "model": chosen_model,
                     "mode": chosen_mode,
-                    "created_at": _jobs[job_id]["created_at"],
+                    "created_at": prev["created_at"],
+                    "stage": "done",
+                    # Keep the live node field set during dispatch so the
+                    # result page shows which node ran the job.
+                    **{k: prev[k] for k in ("node", "worker") if k in prev},
                 }
             _persist_job(job_id, _jobs[job_id])
         except Exception as e:
             logger.error("Transcription failed job=%s error=%s", job_id, str(e))
             async with _jobs_lock:
+                prev = _jobs[job_id]
                 _jobs[job_id] = {
                     "status": "failed",
                     "error": str(e),
                     "model": chosen_model,
                     "mode": chosen_mode,
-                    "created_at": _jobs[job_id]["created_at"],
+                    "created_at": prev["created_at"],
+                    **{k: prev[k] for k in ("node", "stage", "worker") if k in prev},
                 }
             _persist_job(job_id, _jobs[job_id])
         finally:

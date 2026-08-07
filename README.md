@@ -79,6 +79,25 @@ The GPU override:
 - Builds from the CUDA-enabled `Dockerfile` (nvidia/cuda base)
 - Sets `WHISPER_MODEL=large-v3-turbo` for best quality
 - Adds NVIDIA GPU device reservation
+- Always allows local transcription (this host has the GPU)
+
+### GPU worker nodes (dispatch)
+
+A main host without a GPU can dispatch jobs to GPU workers running this same
+app on other machines. Workers are listed in `config/nodes.yaml` (see
+`config/nodes.example.yaml`; `WHISPER_WORKER_URLS`/`WHISPER_WORKER_NAMES`
+env vars are the legacy form). See
+[docs/deploy-worker-nodes.md](docs/deploy-worker-nodes.md) for the full
+worker + reverse-tunnel setup.
+
+- **No CPU fallback by default**: `WHISPER_ALLOW_LOCAL_CPU=false` (default)
+  means a job no node can take fails cleanly with "No transcription node
+  available" instead of running on the main host's CPU. Set it `true` only
+  for plain CPU-only single-host deployments.
+- Auto-dispatch only sends models that fit the workers' VRAM
+  (`WHISPER_GPU_MODELS`, default `tiny,base,small`); the node picker and a
+  `worker` request param can also target a specific node or the built-in
+  `CPU` node.
 
 ## Configuration
 
@@ -86,13 +105,13 @@ The GPU override:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WHISPER_MODEL` | `base` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo, crisperwhisper-large/turbo/medium/small) |
+| `WHISPER_MODEL` | `base` | Model to use (tiny, base, small, medium, large-v3, large-v3-turbo, crisperwhisper-large/turbo/medium/small, parakeet-tdt-0.6b-v3) |
 | `WHISPER_LANGUAGE` | `en` | Language for transcription |
 | `CRISPER_BACKEND` | `auto` | CrisperWhisper runtime: `auto` (prefer ct2 when the `[ct2]` extra is installed, else transformers), `ct2`, or `transformers` |
 | `CRISPER_MODE` | `verbatim` | Default CrisperWhisper transcription mode when a request doesn't specify one: `verbatim` or `intended` |
 | `HOST_PORT` | `8561` | Host port mapping |
 | `MAX_FILE_SIZE` | `536870912` (512 MB) | Max upload size in bytes |
-| `MIN_FREE_DISK_BYTES` | `2147483648` (2 GB) | Minimum free disk space before rejecting uploads |
+| `MIN_FREE_DISK_BYTES` | `536870912` (512 MB) | Minimum free space in WORK_DIR before rejecting uploads (keep below the tmpfs size) |
 | `JOB_RETENTION_SECONDS` | `604800` (1 week) | How long transcription **results** (status.json) are kept |
 | `AUDIO_RETENTION_SECONDS` | `1800` (30 min) | How long the uploaded **recording** is kept before deletion |
 | `MEM_LIMIT` | `8g` | Container memory limit |
@@ -104,15 +123,15 @@ See [.env.example](.env.example) for all options.
 
 | Hardware | Recommended Model | Compute Type |
 |----------|-------------------|--------------|
-| CPU only | tiny, base, crisperwhisper-small | int8 / fp32 |
-| 2 GB VRAM | tiny, base | float16/int8 |
+| CPU only | tiny, base, crisperwhisper-small, parakeet-tdt-0.6b-v3 | int8 / fp32 |
+| 2 GB VRAM | tiny, base, parakeet-tdt-0.6b-v3 | fp16 / fp32 |
 | 4 GB VRAM | base, small | float32 or float16 |
 | 8 GB VRAM | large-v3-turbo, crisperwhisper-turbo | float16, batch=16 |
 | 12 GB+ VRAM | large-v3, crisperwhisper-large | float16, batch=16 |
 
 ### Mandatory Model Choice
 
-Users must **explicitly choose** a model before transcribing. The UI offers two families:
+Users must **explicitly choose** a model before transcribing. The UI offers three families:
 
 | Model | Tradeoff |
 |-------|----------|
@@ -122,6 +141,7 @@ Users must **explicitly choose** a model before transcribing. The UI offers two 
 | **crisperwhisper-medium** | Verbatim word-for-word; near-large quality; ~1.5 GB download. |
 | **crisperwhisper-turbo** | Verbatim word-for-word; fastest large option; ~1.6 GB download. |
 | **crisperwhisper-large** | Verbatim word-for-word; best open quality; ~3.1 GB download; heaviest. |
+| **parakeet-tdt-0.6b-v3** | 600M FastConformer-TDT, 25 EU langs auto-detect, punct/cap, word+segment timestamps; ~2.5 GB download; CC BY 4.0. |
 
 - No pre-selected default — the user must actively pick.
 - The server rejects transcribe/finish requests with a `400` error if `model` is missing or invalid.
@@ -147,10 +167,10 @@ Users must **explicitly choose** a model before transcribing. The UI offers two 
 
 - This app installs `crisperwhisper[transformers]` (pure PyTorch) **on purpose**:
   - The `[ct2]` extra conflicts with faster-whisper — faster-whisper depends on upstream `ctranslate2`, which overwrites the `ctranslate2-crisperwhisper` fork's files in site-packages.
-  - The `[ct2]` wheels are Linux **x86_64 only**; audio.lak.nz is ARM64, so the transformers backend is the only installable option there.
+  - The `[ct2]` wheels are Linux **x86_64 only**; the reference ARM64 host cannot install them, so the transformers backend is the only option there.
 - `CRISPER_BACKEND=auto` (default) picks the ct2 fork only when it is actually installed (`ctranslate2-crisperwhisper` distribution present); otherwise it uses transformers. To force a backend, set `CRISPER_BACKEND=ct2|transformers`.
 - The transformers backend runs on CPU with fp32 (best speed on ARM) and on CUDA with fp16. It loads with eager attention (required for word-timing cross-attention), so it is slower than the ct2 runtime (~4-5x difference on GPU) but fully functional: verbatim/intended, word timestamps, longform and hallucination repair all work.
-- On the live CPU-only host, expect roughly realtime-factor 0.4 on `crisperwhisper-small` (measured on a 4-core ARM64 Oracle A1); larger models are proportionally slower. CrisperWhisper jobs show "working, progress unknown" in the UI because the library does not expose incremental progress.
+- On a CPU-only host, expect roughly realtime-factor 0.4 on `crisperwhisper-small` (measured on a 4-core ARM64 Oracle A1); larger models are proportionally slower. CrisperWhisper jobs show "working, progress unknown" in the UI because the library does not expose incremental progress.
 
 ### Model downloads & disk
 
@@ -160,6 +180,7 @@ Users must **explicitly choose** a model before transcribing. The UI offers two 
 | crisperwhisper-medium | `nyralabs/CrisperWhisper2.0_medium` | ~1.5 GB | ~3 GB |
 | crisperwhisper-turbo | `nyralabs/CrisperWhisper2.0_turbo` | ~1.6 GB | ~3.2 GB |
 | crisperwhisper-large | `nyralabs/CrisperWhisper2.0_large` | ~3.1 GB | ~6.2 GB |
+| parakeet-tdt-0.6b-v3 | `nvidia/parakeet-tdt-0.6b-v3` | ~2.5 GB | ~1.2 GB (fp16) / 2.4 GB (fp32) |
 
 Models are downloaded to the HF cache volume (`hf-cache` → `/cache` in the container; `HF_HOME` elsewhere) on first use. The CrisperWhisper model weights are under the [Nyra Health Non-Commercial Research License](https://huggingface.co/nyralabs/CrisperWhisper2.0_large/blob/main/LICENSE.md) (free for research/non-commercial use; commercial licensing available).
 
@@ -198,7 +219,7 @@ The app includes multiple safeguards for deployment on hosts with limited disk:
 1. **tmpfs work dir** — `/tmp/whisper-stt` is a RAM-backed tmpfs volume capped at 2 GB.
    No host disk space is used for processing; all data is lost on restart.
 2. **MAX_FILE_SIZE** — Default 512 MB upload limit prevents runaway files.
-3. **MIN_FREE_DISK_BYTES** — Uploads are rejected when host free space drops below 2 GB.
+3. **MIN_FREE_DISK_BYTES** — Uploads are rejected when WORK_DIR free space drops below 512 MB (keep this below the tmpfs work-dir size).
 4. **Periodic cleanup** — Stale job directories and chunk sessions older than 30 minutes
    are removed every 10 minutes.
 5. **Startup cleanup** — Only **expired** jobs/recordings are removed; completed transcripts

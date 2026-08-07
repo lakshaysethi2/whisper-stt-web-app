@@ -1,0 +1,117 @@
+# GPU transcription worker image — faster-whisper ONLY, with CTranslate2
+# compiled from source for the small-VRAM GPU workers.
+#
+# Why from source: the stock ctranslate2 pip wheel ships ONLY sm_86/sm_90/
+# sm_100 CUDA kernels, so it cannot run on the workers' Maxwell/Pascal GPUs
+# (940MX = CC 5.0, MX330 = CC 6.1). This image builds CTranslate2 with the
+# target arch in CUDA_ARCH_LIST (build arg: 5.0 or 6.1) and then runs the
+# same whisper-stt app as a localhost-only worker.
+#
+# Version pinned to v4.8.1: the last release whose AWQ CUDA sources compile
+# for sm_50. 4.8.0+ swapped Thrust 1.12 for CCCL 2.7.0, which regressed
+# WhisperModel.align() on some GPUs (OpenNMT/CTranslate2#2064) — this app
+# never calls align() (faster-whisper runs with word_timestamps=False).
+# The AWQ GPU ops are dropped from the build (see below): their sm_75+
+# f16x2/mma PTX cannot compile for sm_50, and whisper never uses AWQ.
+#
+# torch/crisperwhisper are deliberately EXCLUDED (CPU-only torch backend,
+# ~2.5 GB of build) — crisperwhisper-* model jobs are not dispatched to
+# workers in automatic mode. The worker's /health still reports device=cuda
+# so the node picker shows "GPU Node A (GPU)".
+
+# --- Builder: compile CTranslate2 4.8.1 for the target GPU arch -----------
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG CUDA_ARCH_LIST=5.0
+ENV CUDA_ARCH_LIST=${CUDA_ARCH_LIST}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
+    build-essential cmake ninja-build git \
+    && rm -rf /var/lib/apt/lists/*
+
+# pybind11 pinned to the version CTranslate2's build requires.
+RUN pip install --no-cache-dir pybind11==2.11.1 setuptools wheel
+
+WORKDIR /src
+# --recurse-submodules is required: cmake fails without third_party submodules
+# (spdlog, cpu_features, thrust).
+RUN git clone --depth 1 --recurse-submodules --branch v4.8.1 \
+    https://github.com/OpenNMT/CTranslate2.git ct2
+
+# sm_50 build fix: the AWQ GPU ops (src/ops/awq/*_gpu.cu) use sm_53+/sm_75+
+# f16x2/mma inline PTX that ptxas rejects for compute_50, and there is no
+# cmake switch to exclude them (the HIP backend removes them; CUDA does not).
+# They are 4-bit-LLM-quantization ops that whisper never calls, so drop the
+# .cu files and make the dispatch throw instead of linking them.
+RUN cd ct2 \
+  && sed -i '/src\/ops\/awq\/\(gemm\|gemv\|dequantize\)_gpu\.cu/d' CMakeLists.txt \
+  && sed -i 's|DEVICE_DISPATCH([^;]*);|throw std::runtime_error("AWQ GPU ops are not built for this architecture");|' \
+      src/ops/awq/dequantize.cc src/ops/awq/gemm.cc src/ops/awq/gemv.cc
+
+RUN cmake -S ct2 -B ct2/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_CLI=OFF -DBUILD_TESTS=OFF \
+      -DWITH_MKL=OFF -DOPENMP_RUNTIME=COMP \
+      -DWITH_CUDA=ON -DCUDA_DYNAMIC_LOADING=ON \
+      -DCUDA_NVCC_FLAGS="-Xfatbin=-compress-all" \
+      -DCUDA_ARCH_LIST=${CUDA_ARCH_LIST} \
+      -DCMAKE_CXX_FLAGS="-msse4.1" \
+  && cmake --build ct2/build -j"$(nproc)" \
+  && cmake --install ct2/build
+
+# Ensure the installed lib is also reachable at /usr/local/lib64 (the path
+# the python bindings rpath uses; ubuntu cmake installs to /usr/local/lib).
+RUN mkdir -p /usr/local/lib64 && cp -a /usr/local/lib/libctranslate2.so* /usr/local/lib64/ 2>/dev/null || true
+
+# Python bindings (thin pybind11 ext linking the CUDA build installed above).
+# Also build a wheel so the runtime can install the source build reliably
+# (a plain dist-info copy does not stop pip from re-resolving the stock wheel).
+RUN pip install --no-cache-dir ./ct2/python \
+  && pip wheel --no-deps -w /wheelhouse ./ct2/python
+
+# --- Runtime: the whisper worker app on the built CTranslate2 --------------
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip ffmpeg curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# CTranslate2 CUDA build + source-built python wheel. The runtime installs
+# the wheel with --no-deps --force-reinstall AFTER requirements.txt so the
+# stock PyPI wheel (sm_86/90/100 kernels only — cannot run on these GPUs)
+# cannot silently replace it.
+COPY --from=builder /usr/local/lib64/libctranslate2.so* /usr/local/lib64/
+COPY --from=builder /wheelhouse/ctranslate2-*.whl /wheelhouse/
+RUN ldconfig
+
+WORKDIR /app
+COPY requirements.txt .
+# Drop the crisperwhisper[transformers] line: CPU-only torch backend, not
+# wanted here. ctranslate2 is pinned to the version built from source above
+# (see note: the source build must stay installed, not the stock wheel).
+RUN sed -i '/^crisperwhisper/d' requirements.txt \
+  && echo 'ctranslate2==4.8.1' >> requirements.txt \
+  && pip install --no-cache-dir -r requirements.txt \
+  && pip install --no-cache-dir --no-deps --force-reinstall /wheelhouse/ctranslate2-*.whl \
+  && test ! -d /usr/local/lib/python3.10/dist-packages/ctranslate2.libs \
+  && echo "worker image: source-built ctranslate2 (not the stock wheel) OK"
+
+COPY app/ app/
+COPY static/ static/
+
+RUN useradd -m -s /bin/bash appuser
+RUN mkdir -p /tmp/whisper-stt && chown appuser:appuser /tmp/whisper-stt
+RUN mkdir -p /cache && chown appuser:appuser /cache
+ENV HF_HOME=/cache
+USER appuser
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
