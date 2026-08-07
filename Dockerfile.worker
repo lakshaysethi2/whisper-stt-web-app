@@ -101,10 +101,12 @@ COPY requirements.txt .
 # built ctranslate2 after requirements so the stock wheel cannot replace it.
 RUN echo 'ctranslate2==4.8.1' >> requirements.txt \
   && pip install --no-cache-dir -r requirements.txt \
+  && pip install --no-cache-dir librosa==0.11.0 soundfile==0.14.0 \
   && pip install --no-cache-dir --no-deps --force-reinstall /wheelhouse/ctranslate2-*.whl \
   && python3 -c "import crisperwhisper; print('crisperwhisper', crisperwhisper.__version__, 'ok')" \
+  && python3 -c "import librosa, soundfile; print('librosa', librosa.__version__, 'soundfile', soundfile.__version__, 'ok')" \
   && test ! -d /usr/local/lib/python3.10/dist-packages/ctranslate2.libs \
-  && echo "worker image: source-built ctranslate2 + crisperwhisper[transformers] OK"
+  && echo "worker image: source-built ctranslate2 + crisperwhisper[transformers] + librosa/soundfile OK"
 
 COPY app/ app/
 COPY static/ static/
