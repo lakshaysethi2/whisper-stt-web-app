@@ -38,9 +38,13 @@ WHISPER_WORKER_NAMES = [n["name"] for n in NODES]
 # Models we may dispatch to the workers' small-VRAM GPUs. The worker GPUs
 # (Maxwell/Pascal) run float32 (no fp16/int8 kernels on CC 5.0/6.1):
 # tiny/base/small fit ~2 GB VRAM; larger models would OOM the worker and
-# waste the upload round trip. CrisperWhisper needs the torch backend the
-# worker image deliberately excludes, so it is never auto-dispatched.
-# An explicitly chosen node overrides this list (see should_dispatch).
+# waste the upload round trip. The worker image now includes
+# crisperwhisper[transformers] (pure-PyTorch, no ct2 fork conflict, same
+# ffmpeg 16kHz mono pre-decode and job queue) so explicit
+# crisperwhisper-* jobs dispatched to a GPU node complete instead of
+# failing with "crisperwhisper is not installed"; automatic dispatch
+# still limits to the small-VRAM set — a user-chosen node overrides this
+# list (see should_dispatch).
 WHISPER_GPU_MODELS = {
     m.strip()
     for m in os.getenv("WHISPER_GPU_MODELS", "tiny,base,small").split(",")
