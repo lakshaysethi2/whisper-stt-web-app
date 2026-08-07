@@ -1,0 +1,84 @@
+# GPU transcription worker image — faster-whisper ONLY, with CTranslate2
+# compiled from source for the laptop GPUs.
+#
+# Why from source: the stock ctranslate2 pip wheel ships ONLY sm_86/sm_90/
+# sm_100 CUDA kernels, so it cannot run on the laptops' Maxwell/Pascal GPUs
+# (940MX = CC 5.0, MX330 = CC 6.1). This image builds CTranslate2 v4.8.1 with
+# the target arch in CUDA_ARCH_LIST (build arg: 5.0 on laptop1, 6.1 on
+# laptop2) and then runs the same whisper-stt app as a localhost-only worker.
+#
+# torch/crisperwhisper are deliberately EXCLUDED (CPU-only torch backend,
+# ~2.5 GB of build) — crisperwhisper-* model jobs stay on the VPS in
+# automatic mode. The worker's /health still reports device=cuda so the node
+# picker shows "Laptop 1 (GPU)".
+
+# --- Builder: compile CTranslate2 4.8.1 for the target GPU arch -----------
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG CUDA_ARCH_LIST=5.0
+ENV CUDA_ARCH_LIST=${CUDA_ARCH_LIST}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
+    build-essential cmake ninja-build git \
+    && rm -rf /var/lib/apt/lists/*
+
+# pybind11 pinned to the version CTranslate2's build requires.
+RUN pip install --no-cache-dir pybind11==2.11.1 setuptools wheel
+
+WORKDIR /src
+RUN git clone --depth 1 --branch v4.8.1 https://github.com/OpenNMT/CTranslate2.git ct2
+
+RUN cmake -S ct2 -B ct2/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_CLI=OFF -DBUILD_TESTS=OFF \
+      -DWITH_MKL=OFF -DOPENMP_RUNTIME=COMP \
+      -DWITH_CUDA=ON -DCUDA_DYNAMIC_LOADING=ON \
+      -DCUDA_NVCC_FLAGS="-Xfatbin=-compress-all" \
+      -DCUDA_ARCH_LIST=${CUDA_ARCH_LIST} \
+      -DCMAKE_CXX_FLAGS="-msse4.1" \
+  && cmake --build ct2/build -j"$(nproc)" \
+  && cmake --install ct2/build
+
+# Python bindings (links the CUDA build installed to /usr/local/lib64).
+RUN pip install --no-cache-dir ./ct2/python
+
+# --- Runtime: the whisper worker app on the built CTranslate2 --------------
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip ffmpeg curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# CTranslate2 CUDA build + python package (same python 3.10 on ubuntu 22.04).
+COPY --from=builder /usr/local/lib64/libctranslate2.so* /usr/local/lib64/
+COPY --from=builder /usr/local/lib/python3.10/dist-packages/ctranslate2 \
+                    /usr/local/lib/python3.10/dist-packages/ctranslate2
+RUN ldconfig
+
+WORKDIR /app
+COPY requirements.txt .
+# Drop the crisperwhisper[transformers] line: CPU-only torch backend, not
+# wanted here. faster-whisper's ctranslate2>=4.0 requirement is satisfied by
+# the source build above, so pip leaves it alone.
+RUN sed -i '/^crisperwhisper/d' requirements.txt \
+  && pip install --no-cache-dir -r requirements.txt
+
+COPY app/ app/
+COPY static/ static/
+
+RUN useradd -m -s /bin/bash appuser
+RUN mkdir -p /tmp/whisper-stt && chown appuser:appuser /tmp/whisper-stt
+RUN mkdir -p /cache && chown appuser:appuser /cache
+ENV HF_HOME=/cache
+USER appuser
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

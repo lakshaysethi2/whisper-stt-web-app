@@ -14,7 +14,12 @@ services:
   whisper-worker:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.worker
+      # GPU arch per laptop: 940MX = 5.0 (default), MX330 = 6.1 (set
+      # WORKER_CUDA_ARCH=6.1 on laptop2). The stock ctranslate2 wheel has no
+      # kernels for these GPUs, so the worker image compiles it from source.
+      args:
+        CUDA_ARCH_LIST: ${WORKER_CUDA_ARCH:-5.0}
     image: whisper-stt-web-app:worker
     ports:
       - "127.0.0.1:${HOST_PORT:-8564}:8000"
