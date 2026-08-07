@@ -7,12 +7,12 @@
 # target arch in CUDA_ARCH_LIST (build arg: 5.0 or 6.1) and then runs the
 # same whisper-stt app as a localhost-only worker.
 #
-# Version pinned to v4.8.1: it is the last release whose AWQ CUDA sources
-# compile for sm_50 (4.7.x uses sm_53-only f16 PTX in src/ops/awq/*.cu) and
-# it built successfully for this GPU before. 4.8.0+ swapped Thrust 1.12 for
-# CCCL 2.7.0, which regressed WhisperModel.align() on some GPUs
-# (OpenNMT/CTranslate2#2064) — this app never calls align() (faster-whisper
-# runs with word_timestamps=False), so that regression does not apply here.
+# Version pinned to v4.8.1: the last release whose AWQ CUDA sources compile
+# for sm_50. 4.8.0+ swapped Thrust 1.12 for CCCL 2.7.0, which regressed
+# WhisperModel.align() on some GPUs (OpenNMT/CTranslate2#2064) — this app
+# never calls align() (faster-whisper runs with word_timestamps=False).
+# The AWQ GPU ops are dropped from the build (see below): their sm_75+
+# f16x2/mma PTX cannot compile for sm_50, and whisper never uses AWQ.
 #
 # torch/crisperwhisper are deliberately EXCLUDED (CPU-only torch backend,
 # ~2.5 GB of build) — crisperwhisper-* model jobs are not dispatched to
@@ -39,6 +39,16 @@ WORKDIR /src
 # (spdlog, cpu_features, thrust).
 RUN git clone --depth 1 --recurse-submodules --branch v4.8.1 \
     https://github.com/OpenNMT/CTranslate2.git ct2
+
+# sm_50 build fix: the AWQ GPU ops (src/ops/awq/*_gpu.cu) use sm_53+/sm_75+
+# f16x2/mma inline PTX that ptxas rejects for compute_50, and there is no
+# cmake switch to exclude them (the HIP backend removes them; CUDA does not).
+# They are 4-bit-LLM-quantization ops that whisper never calls, so drop the
+# .cu files and make the dispatch throw instead of linking them.
+RUN cd ct2 \
+  && sed -i '/src\/ops\/awq\/\(gemm\|gemv\|dequantize\)_gpu\.cu/d' CMakeLists.txt \
+  && sed -i 's|DEVICE_DISPATCH([^;]*);|throw std::runtime_error("AWQ GPU ops are not built for this architecture");|' \
+      src/ops/awq/dequantize.cc src/ops/awq/gemm.cc src/ops/awq/gemv.cc
 
 RUN cmake -S ct2 -B ct2/build \
       -DCMAKE_BUILD_TYPE=Release \
