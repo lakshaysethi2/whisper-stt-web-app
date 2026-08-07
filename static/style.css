@@ -672,6 +672,92 @@ select.input-error {
   line-height: 1.4;
 }
 
+/* --- Node picker (where should this job run) --- */
+.node-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.node-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+.node-pill:active {
+  transform: scale(0.98);
+}
+
+.node-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.node-pill.active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, var(--bg-input));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 25%, transparent);
+}
+
+.node-sub {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.node-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--text-muted);
+}
+
+.node-dot-on {
+  background: var(--success);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--success) 60%, transparent);
+}
+
+.node-dot-auto {
+  background: var(--primary);
+}
+
+.node-dot-cpu {
+  background: #888;
+}
+
+.node-dot-off {
+  background: #888;
+}
+
+.node-banner {
+  font-size: 0.82rem;
+  line-height: 1.4;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, #f5a623 14%, var(--bg-input));
+  border: 1px solid color-mix(in srgb, #f5a623 40%, transparent);
+  color: var(--text);
+}
+
+.badge-node {
+  background: color-mix(in srgb, var(--primary) 14%, var(--bg-input));
+  color: var(--text);
+}
+
 /* Browser STT card */
 .browser-stt-card {
   border-color: var(--border-light);

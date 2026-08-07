@@ -1,0 +1,56 @@
+# GPU transcription worker for the GPU-node deployment pattern.
+#
+# Standalone deployment: builds and runs the app's GPU image as a worker
+# that the main deployment dispatches jobs to. No public UI — binds localhost
+# only; the main host reaches it through a reverse SSH tunnel (see
+# docs/deploy-worker-nodes.md).
+#
+# Usage on a worker host:
+#   docker compose -f docker-compose.worker.yml up -d --build
+#
+# Multiple workers share the load; each binds a distinct local port
+# (HOST_PORT=8564, 8565, ...) mapped to a distinct port on the main host.
+services:
+  whisper-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+      # GPU arch per worker (940MX-class = 5.0 default, MX330-class = 6.1 set
+      # WORKER_CUDA_ARCH=6.1). The stock ctranslate2 wheel has no kernels for
+      # these GPUs, so the worker image compiles it from source.
+      args:
+        CUDA_ARCH_LIST: ${WORKER_CUDA_ARCH:-5.0}
+    image: whisper-stt-web-app:worker
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8564}:8000"
+    environment:
+      # This host IS the GPU node — always allowed to transcribe locally.
+      - WHISPER_ALLOW_LOCAL_CPU=true
+      # Small model: the worker GPUs (Maxwell/Pascal, ~2-4 GB VRAM) run
+      # float32 — medium and up would OOM. Jobs for other models arrive
+      # with their own model name and are loaded on demand.
+      - WHISPER_MODEL=${WHISPER_MODEL:-small}
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+      - MAX_FILE_SIZE=${MAX_FILE_SIZE:-536870912}
+      - MIN_FREE_DISK_BYTES=${MIN_FREE_DISK_BYTES:-536870912}
+      - JOB_RETENTION_SECONDS=${JOB_RETENTION_SECONDS:-7200}
+      - AUDIO_RETENTION_SECONDS=${AUDIO_RETENTION_SECONDS:-1800}
+      - HF_HOME=/cache
+    volumes:
+      - hf-cache:/cache
+      # Deployment node list (config/nodes.yaml); workers typically have none.
+      - ./config:/app/config:ro
+    tmpfs:
+      - /tmp/whisper-stt:size=2G,uid=1000,gid=1000
+    mem_limit: ${MEM_LIMIT:-6442450944}  # 6 GiB
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:

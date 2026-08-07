@@ -45,7 +45,15 @@
     headerNewBtn: $("#header-new-btn"),
     resultNewBtn: $("#result-new-btn"),
     modelError: $("#model-error"),
+    nodePicker: $("#node-picker"),
+    nodeBanner: $("#node-banner"),
+    resultNode: $("#result-node"),
   };
+
+  // Node picker state: "auto", a node's display NAME, or "CPU".
+  let selectedNode = "auto";
+  let workerList = [];
+  let allowLocalCpu = true; // refreshed from /api/nodes; true for old backends
 
   const uploadConfig = {
     chunkSize: 5 * 1024 * 1024,
@@ -105,6 +113,9 @@
       }
     } catch {}
 
+    refreshWorkers();
+    setInterval(refreshWorkers, 30000); // keep node online/offline honest
+
     // Check if we loaded into a job page
     const jobId = getJobIdFromPath();
     if (jobId) {
@@ -115,6 +126,87 @@
       showMainUI();
     }
     setupActions();
+  }
+
+  // --- Node picker (which machine should transcribe this job) ---
+
+  function getSelectedNode() {
+    return selectedNode;
+  }
+
+  async function refreshWorkers() {
+    try {
+      let r = await fetch("/api/nodes");
+      if (!r.ok) r = await fetch("/api/workers"); // old backend
+      if (!r.ok) return;
+      const data = await r.json();
+      workerList = data.nodes || data.workers || [];
+      if (typeof data.allow_local_cpu === "boolean") allowLocalCpu = data.allow_local_cpu;
+      else if (data.cpu) allowLocalCpu = data.cpu.enabled !== false;
+      renderNodePicker();
+    } catch {}
+  }
+
+  function renderNodePicker() {
+    if (!els.nodePicker) return;
+    const online = workerList.filter((w) => w.online);
+    const offline = workerList.filter((w) => !w.online);
+
+    // Keep the current selection if the node still exists.
+    const stillThere = workerList.some((w) => w.name === selectedNode);
+    if (selectedNode !== "auto" && selectedNode !== "CPU" && !stillThere) selectedNode = "auto";
+    if (selectedNode === "CPU" && !allowLocalCpu) selectedNode = "auto";
+
+    const pills = [
+      `<button type="button" class="node-pill${selectedNode === "auto" ? " active" : ""}" data-node="auto">` +
+        `<span class="node-dot node-dot-auto"></span>Automatic<span class="node-sub">recommended</span></button>`,
+    ];
+    workerList.forEach((w) => {
+      const cls = selectedNode === w.name ? " active" : "";
+      const dot = w.online ? "node-dot-on" : "node-dot-off";
+      const sub = w.online ? (w.device === "cuda" ? "GPU online" : "online") : "offline";
+      pills.push(
+        `<button type="button" class="node-pill${cls}" data-node="${escapeHtml(w.name)}">` +
+          `<span class="node-dot ${dot}"></span>${escapeHtml(w.name)}<span class="node-sub">${sub}</span></button>`
+      );
+    });
+    const cpuCls = selectedNode === "CPU" ? " active" : "";
+    const cpuSub = allowLocalCpu ? "this machine" : "disabled";
+    pills.push(
+      `<button type="button" class="node-pill${cpuCls}" data-node="CPU"${allowLocalCpu ? "" : " disabled"}>` +
+        `<span class="node-dot node-dot-cpu"></span>CPU<span class="node-sub">${cpuSub}</span></button>`
+    );
+    els.nodePicker.innerHTML = pills.join("");
+
+    els.nodePicker.querySelectorAll(".node-pill").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (btn.disabled) return;
+        selectedNode = btn.dataset.node;
+        els.nodePicker.querySelectorAll(".node-pill").forEach((b) => b.classList.toggle("active", b === btn));
+        refreshWorkers(); // re-check availability right when the user taps
+      });
+    });
+
+    // Banner: name offline nodes so it is obvious jobs may not use them.
+    if (els.nodeBanner) {
+      if (offline.length > 0) {
+        const names = offline.map((w) => w.name).join(", ");
+        els.nodeBanner.textContent =
+          workerList.length === offline.length
+            ? (allowLocalCpu
+                ? "No GPU nodes are online — jobs will run on CPU."
+                : "No GPU nodes are online — jobs will fail until a node is available.")
+            : `${names} ${offline.length === 1 ? "is" : "are"} offline — jobs use the online nodes.`;
+        els.nodeBanner.classList.remove("hidden");
+      } else {
+        els.nodeBanner.classList.add("hidden");
+      }
+    }
+    if (els.nodeHint) {
+      els.nodeHint.textContent = allowLocalCpu
+        ? "Automatic sends the job to a reachable GPU node, or CPU if none are online."
+        : "Automatic sends the job to a reachable GPU node. CPU transcription is disabled.";
+    }
   }
 
   // --- Resume job from URL ---
@@ -141,7 +233,7 @@
     }
 
     if (status.status === "completed") {
-      showResumeResult(status.result, jobId, status.expires_at);
+      showResumeResult(status.result, jobId, status.expires_at, status.node);
     } else if (status.status === "failed") {
       showResumeError(status.error || "Transcription failed");
     } else if (status.status === "interrupted") {
@@ -178,7 +270,7 @@
         const status = await r.json();
         if (status.status === "completed") {
           clearInterval(pollTimer);
-          showResumeResult(status.result, jobId, status.expires_at);
+          showResumeResult(status.result, jobId, status.expires_at, status.node);
         } else if (status.status === "failed") {
           clearInterval(pollTimer);
           showResumeError(status.error || "Transcription failed");
@@ -222,23 +314,26 @@
     els.resumeView.classList.remove("hidden");
     els.resumeTitle.textContent = "Transcription in progress";
     els.resumeStatus.classList.remove("hidden");
-    const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
-    let progressMsg;
-    if (status.progress_note === "working") {
-      progressMsg = `Transcribing... ${elapsed}s elapsed (working, progress unknown)`;
-    } else {
-      const pct = Math.round((status.progress || 0) * 100);
-      progressMsg = `Transcribing... ${elapsed}s elapsed (${pct}%)`;
-    }
-    els.resumeStatus.innerHTML = `<div class="spinner"></div><span>${escapeHtml(progressMsg)}</span>`;
+    els.resumeStatus.innerHTML = `<div class="spinner"></div><span>${escapeHtml(statusMessage(status))}</span>`;
     els.resumeError.classList.add("hidden");
     els.resumeHomeBtn.classList.remove("hidden");
   }
 
-  function showResumeResult(result, jobId, expiresAt) {
+  function setResultNode(node) {
+    if (!els.resultNode) return;
+    if (node) {
+      els.resultNode.textContent = `on ${node}`;
+      els.resultNode.classList.remove("hidden");
+    } else {
+      els.resultNode.classList.add("hidden");
+    }
+  }
+
+  function showResumeResult(result, jobId, expiresAt, node) {
     els.resumeView.classList.add("hidden");
     showMainUI();
     showResult(result);
+    setResultNode(node);
     // Add the save link with the completed job URL and its real expiry
     showSaveLink(jobId, expiresAt);
     // Show "Start new transcription" button in the result toolbar
@@ -562,6 +657,25 @@
   }
 
   // Shared polling after job creation (used by both directUpload and chunkedUpload)
+  // Human-readable status line from a job status payload, showing the node
+  // and stage: "Processing on GPU Node B (GPU) — transcribing (37%)".
+  function statusMessage(status) {
+    const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
+    const node = status.node || "waiting";
+    const stage = status.stage || status.status;
+    if (status.progress_note === "working" && stage !== "uploaded") {
+      return `Processing on ${node} — working, progress unknown (${elapsed}s elapsed)`;
+    }
+    if (stage === "uploaded" || node === "waiting") {
+      return `Uploaded — waiting for a node… (${elapsed}s elapsed)`;
+    }
+    if (stage === "dispatched") {
+      return `Dispatched to ${node} — starting… (${elapsed}s elapsed)`;
+    }
+    const pct = Math.round((status.progress || 0) * 100);
+    return `Processing on ${node} — transcribing (${pct}%)`;
+  }
+
   function pollForJobCompletion(jobId) {
     currentJobId = jobId;
     const url = setJobUrl(jobId);
@@ -587,6 +701,7 @@
         .then((status) => {
           if (status.status === "completed") {
             showResult(status.result);
+            setResultNode(status.node);
             showSaveLink(jobId, status.expires_at);
             resetUploadUI();
           } else if (status.status === "failed") {
@@ -597,16 +712,8 @@
             showResumeInterrupted(status);
             resetUploadUI();
           } else {
-            // processing — update progress
-            const elapsed = status.elapsed_seconds ? Math.round(status.elapsed_seconds) : 0;
-            let progressMsg;
-            if (status.progress_note === "working") {
-              progressMsg = `Transcribing... ${elapsed}s elapsed (working, progress unknown)`;
-            } else {
-              const pct = Math.round((status.progress || 0) * 100);
-              progressMsg = `Transcribing... ${elapsed}s elapsed (${pct}%)`;
-            }
-            showStatus(progressMsg);
+            // processing — update progress with node + stage
+            showStatus(statusMessage(status));
             setTimeout(poll, POLL_INTERVAL_MS);
           }
         })
@@ -626,6 +733,7 @@
     form.append("model", getSelectedModel());
     const mode = getSelectedMode();
     if (mode) form.append("mode", mode);
+    form.append("worker", getSelectedNode());
 
     showStatus("Uploading: 0%...");
 
@@ -771,10 +879,12 @@
 
     const model = getSelectedModel();
     const mode = getSelectedMode();
+    const node = getSelectedNode();
     const queryParts = [];
     if (els.language.value) queryParts.push(`language=${encodeURIComponent(els.language.value)}`);
     if (model) queryParts.push(`model=${encodeURIComponent(model)}`);
     if (mode) queryParts.push(`mode=${encodeURIComponent(mode)}`);
+    if (node && node !== "auto") queryParts.push(`worker=${encodeURIComponent(node)}`);
     const queryStr = queryParts.length ? "?" + queryParts.join("&") : "";
 
     let jobId;
@@ -810,6 +920,7 @@
 
   function showResult(data) {
     hideStatus();
+    setResultNode(null); // fresh result; resume flow sets it explicitly
     els.result.classList.remove("hidden");
     els.resultText.textContent = data.text || "(no speech detected)";
     els.resultLang.textContent = data.language || "unknown";

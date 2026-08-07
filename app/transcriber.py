@@ -49,28 +49,39 @@ _resolved_crisper_backend: str | None = None
 
 
 def _get_gpu_info() -> dict:
-    """Query nvidia-smi for GPU name and memory."""
+    """Query nvidia-smi for GPU name, memory and compute capability."""
     import subprocess
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=name,memory.total,compute_cap", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
             line = result.stdout.strip().split("\n")[0]
-            parts = line.rsplit(",", 1)
-            return {"name": parts[0].strip(), "vram_mb": int(parts[1].strip())}
+            parts = line.rsplit(",", 2)
+            cc = parts[2].strip()
+            try:
+                major, minor = cc.split(".")
+                cc_int = int(major) * 10 + int(minor)
+            except (ValueError, IndexError):
+                cc_int = None
+            return {
+                "name": parts[0].strip(),
+                "vram_mb": int(parts[1].strip()),
+                "cc": cc_int,
+            }
     except (subprocess.TimeoutExpired, FileNotFoundError, IndexError, ValueError):
         pass
     return {}
 
 
 def _gpu_name_to_cc(name: str) -> int:
-    """Map GPU name to approximate compute capability."""
+    """Map GPU name to approximate compute capability (fallback when the
+    driver's compute_cap query is unavailable)."""
     name_lower = name.lower()
     if any(x in name_lower for x in ["940mx", "950m", "960m", "940m", "gtx 9", "gtx9"]):
         return 50
-    if any(x in name_lower for x in ["p100", "p40", "p4", "gtx 10", "gtx10", "tesla p"]):
+    if any(x in name_lower for x in ["mx330", "mx150", "mx250", "mx350", "p100", "p40", "p4", "gtx 10", "gtx10", "tesla p"]):
         return 61
     if any(x in name_lower for x in ["v100", "tesla v"]):
         return 70
@@ -109,7 +120,7 @@ def _detect_device() -> tuple[str, str, int]:
 
     device_name = gpu_info["name"]
     vram_mb = gpu_info["vram_mb"]
-    cc_int = _gpu_name_to_cc(device_name)
+    cc_int = gpu_info.get("cc") or _gpu_name_to_cc(device_name)
     cc_major = cc_int // 10
     cc_minor = cc_int % 10
 
