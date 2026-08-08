@@ -90,28 +90,9 @@
       </div>
       <div class="form-group">
         <label class="form-label">Where should this run?</label>
-        <div class="node-picker" id="node-picker">
-          <button type="button" class="node-pill active" data-node="auto">
-            <span class="node-dot node-dot-auto"></span>
-            Automatic
-            <span class="node-sub">recommended</span>
-          </button>
-          <button type="button" class="node-pill" data-node="GPU Node A">
-            <span class="node-dot node-dot-off"></span>
-            GPU Node A
-            <span class="node-sub">checking…</span>
-          </button>
-          <button type="button" class="node-pill" data-node="GPU Node B">
-            <span class="node-dot node-dot-off"></span>
-            GPU Node B
-            <span class="node-sub">checking…</span>
-          </button>
-          <button type="button" class="node-pill" data-node="CPU">
-            <span class="node-dot node-dot-cpu"></span>
-            CPU
-            <span class="node-sub">this machine</span>
-          </button>
-        </div>
+        <select id="node-select" aria-label="Transcription node">
+          <option value="auto">Automatic — recommended</option>
+        </select>
         <p class="node-banner hidden" id="node-banner"></p>
         <p class="form-hint" id="node-hint">Automatic sends the job to a reachable GPU node, or the CPU if none are online.</p>
       </div>

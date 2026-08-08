@@ -45,7 +45,7 @@
     headerNewBtn: $("#header-new-btn"),
     resultNewBtn: $("#result-new-btn"),
     modelError: $("#model-error"),
-    nodePicker: $("#node-picker"),
+    nodeSelect: $("#node-select"),
     nodeBanner: $("#node-banner"),
     resultNode: $("#result-node"),
   };
@@ -148,8 +148,7 @@
   }
 
   function renderNodePicker() {
-    if (!els.nodePicker) return;
-    const online = workerList.filter((w) => w.online);
+    if (!els.nodeSelect) return;
     const offline = workerList.filter((w) => !w.online);
 
     // Keep the current selection if the node still exists.
@@ -157,35 +156,42 @@
     if (selectedNode !== "auto" && selectedNode !== "CPU" && !stillThere) selectedNode = "auto";
     if (selectedNode === "CPU" && !allowLocalCpu) selectedNode = "auto";
 
-    const pills = [
-      `<button type="button" class="node-pill${selectedNode === "auto" ? " active" : ""}" data-node="auto">` +
-        `<span class="node-dot node-dot-auto"></span>Automatic<span class="node-sub">recommended</span></button>`,
-    ];
+    const prev = els.nodeSelect.value;
+    els.nodeSelect.innerHTML = "";
+    const autoOpt = document.createElement("option");
+    autoOpt.value = "auto";
+    autoOpt.textContent = "Automatic — recommended";
+    els.nodeSelect.appendChild(autoOpt);
     workerList.forEach((w) => {
-      const cls = selectedNode === w.name ? " active" : "";
-      const dot = w.online ? "node-dot-on" : "node-dot-off";
-      const sub = w.online ? (w.device === "cuda" ? "GPU online" : "online") : "offline";
-      pills.push(
-        `<button type="button" class="node-pill${cls}" data-node="${escapeHtml(w.name)}">` +
-          `<span class="node-dot ${dot}"></span>${escapeHtml(w.name)}<span class="node-sub">${sub}</span></button>`
-      );
+      const opt = document.createElement("option");
+      opt.value = w.name;
+      const state = w.online ? "Online" : "Offline";
+      const gpu = w.device === "cuda" && w.online ? " (GPU)" : "";
+      opt.textContent = `${w.name} — ${state}${gpu}`;
+      els.nodeSelect.appendChild(opt);
     });
-    const cpuCls = selectedNode === "CPU" ? " active" : "";
-    const cpuSub = allowLocalCpu ? "this machine" : "disabled";
-    pills.push(
-      `<button type="button" class="node-pill${cpuCls}" data-node="CPU"${allowLocalCpu ? "" : " disabled"}>` +
-        `<span class="node-dot node-dot-cpu"></span>CPU<span class="node-sub">${cpuSub}</span></button>`
-    );
-    els.nodePicker.innerHTML = pills.join("");
+    const cpuOpt = document.createElement("option");
+    cpuOpt.value = "CPU";
+    cpuOpt.textContent = allowLocalCpu ? "CPU — this machine" : "CPU — disabled";
+    cpuOpt.disabled = !allowLocalCpu;
+    els.nodeSelect.appendChild(cpuOpt);
 
-    els.nodePicker.querySelectorAll(".node-pill").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (btn.disabled) return;
-        selectedNode = btn.dataset.node;
-        els.nodePicker.querySelectorAll(".node-pill").forEach((b) => b.classList.toggle("active", b === btn));
-        refreshWorkers(); // re-check availability right when the user taps
-      });
-    });
+    // restore selection confidently (never show "checking…")
+    if (["auto", "CPU", ...workerList.map((w) => w.name)].includes(selectedNode)) {
+      els.nodeSelect.value = selectedNode;
+    } else if (prev) {
+      els.nodeSelect.value = prev;
+      selectedNode = prev;
+    } else {
+      els.nodeSelect.value = "auto";
+      selectedNode = "auto";
+    }
+
+    // single change handler (re-bind each render)
+    els.nodeSelect.onchange = () => {
+      selectedNode = els.nodeSelect.value;
+      refreshWorkers();
+    };
 
     // Banner: name offline nodes so it is obvious jobs may not use them.
     if (els.nodeBanner) {
